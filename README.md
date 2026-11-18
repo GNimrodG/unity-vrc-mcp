@@ -1,23 +1,35 @@
 # Unity VRC MCP
 
 An [MCP](https://modelcontextprotocol.io) server for Claude Code (or any MCP client) that inspects and drives the Unity
-editor. It is aimed at debugging VRChat avatars: animators, expression parameters and menus, clip bindings, and the live
-state of the Av3Emulator in play mode.
+editor. It is aimed at VRChat avatars: debugging animators, expression parameters and menus, clip bindings and the live
+state of the Av3Emulator in play mode, and running the VRChat SDK's validation, builds and uploads.
 
 ## Install
 
-1. In ALCOM (or the VRChat Creator Companion): **Settings → Packages → Add Repository** and add
-   `https://raw.githubusercontent.com/GNimrodG/unity-vrc-mcp/vpm/index.json`.
-   While the repository is private, add a header to it there: `Authorization` = `Bearer <token>`, using a
-   fine-grained GitHub token limited to this repository with read-only **Contents** access. The listing itself tells
-   ALCOM to send `Accept: application/octet-stream` when it downloads the zips.
-2. Add **Unity VRC MCP** to your avatar project.
-3. Open the project in Unity once. The package writes an `unity` entry into the project's `.mcp.json`
-   (menu **Tools → Unity VRC MCP → Register in .mcp.json** does it again).
-4. Start Claude Code in the project folder and approve the `unity` MCP server.
+**[Add to VCC / ALCOM](https://gnimrodg.github.io/unity-vrc-mcp/)** (one click on that page), or add the repository by
+hand in ALCOM or the VRChat Creator Companion under **Settings → Packages → Add Repository**:
 
-Requirements: Unity 2022.3, the VRChat SDK (any 3.4+), Node.js 18+ on `PATH`. The Av3Emulator tools need
-[Av3Emulator](https://github.com/lyuma/Av3Emulator) 3.4+.
+```
+https://raw.githubusercontent.com/GNimrodG/unity-vrc-mcp/vpm/index.json
+```
+
+Then:
+
+1. Add **Unity VRC MCP** to your avatar project.
+2. Open the project in Unity. The package adds a `unity` server to the project's `.mcp.json` by itself (the menu
+   **Tools → Unity VRC MCP → Register in .mcp.json** does it again).
+3. Start Claude Code in the project folder and approve the `unity` MCP server.
+
+Requirements: Unity 2022.3, the VRChat SDK 3.4+, Node.js 18+ on `PATH`, and an MCP client such as Claude Code. The
+Av3Emulator tools need [Av3Emulator](https://github.com/lyuma/Av3Emulator) 3.4+.
+
+<details>
+<summary>Installing from a private copy of this repository</summary>
+
+A private repository's listing and release files need a GitHub token. Add the repository with the header
+`Authorization` = `Bearer <token>`, using a fine-grained token limited to that repository with read-only **Contents**
+access. The listing tells ALCOM/VCC to send `Accept: application/octet-stream` when it downloads the zips.
+</details>
 
 ## How it works
 
@@ -38,6 +50,8 @@ or updating the package.
 | Scene and assets | `hierarchy`, `find_objects`, `inspect_object`, `set_property`, `blendshapes`, `find_assets`, `select`, `capture_view` |
 | Avatar (edit mode) | `avatar_report`, `inspect_animator` (write defaults, condition/parameter checks, clip bindings vs. the avatar), `inspect_clip`, `av3_menu` |
 | Av3Emulator (play mode) | `av3_state`, `av3_set`, `av3_record`, `av3_menu` (with live values) |
+| VRChat SDK | `vrc_sdk_status`, `vrc_validate`, `vrc_performance`, `vrc_avatar_info`, `vrc_my_avatars`, `vrc_build`, `vrc_upload`, `vrc_update_avatar` |
+| Background jobs | `job_status`, `job_cancel` |
 
 Typical Av3 debugging flow:
 
@@ -49,6 +63,37 @@ Typical Av3 debugging flow:
 
 In play mode the emulator runs the controllers that VRCFury (and optimizers such as d4rkAvatarOptimizer) build, so layer
 and parameter names can differ from the source controllers (`[VFnn]` layer prefixes, `VFnn_` parameters).
+
+## VRChat SDK tools
+
+These need the VRChat Avatars SDK (`com.vrchat.avatars` 3.4+); without it they are left out. They use the SDK's own
+builder, validation and API client, so they behave like the SDK Control Panel:
+
+- `vrc_sdk_status`: SDK versions, build target, login state, Control Panel state, scene avatars and their blueprint ids.
+- `vrc_validate`: the SDK's pre-upload checks (the errors, warnings and stats the Control Panel lists) for the current
+  build target.
+- `vrc_performance`: PC and mobile performance ratings with the raw stats.
+- `vrc_avatar_info`, `vrc_my_avatars`: avatar records from the VRChat API (release status, versions, platforms, dates).
+- `vrc_build`: a local build, or "Build & Test", for the current build target. Runs VRCFury and other build hooks.
+  Nothing is uploaded.
+- `vrc_upload`, `vrc_update_avatar`: upload a new version (or a new avatar), or change name, description, tags or
+  release status. Without `confirm: true` they only return a preview of what would happen.
+
+Login only happens in the SDK Control Panel (it logs in with saved credentials when it opens); the tools never handle
+credentials. The SDK's copyright agreement dialog appears in Unity and must be answered there. API calls, builds and
+uploads run as background jobs: the tool waits for them, and `job_status` / `job_cancel` handle long ones.
+
+### Several platforms
+
+Without `platforms`, `vrc_upload` uploads for the editor's current build target. With `platforms` (`["all"]`, or any of
+`windows`, `android`, `ios`) it runs the SDK's own multi-platform upload, like the Control Panel's platform selector:
+
+- The preview lists which object is built per platform, including the avatar's per-platform overrides (for example a
+  separate Quest version), and whether Unity's build support for each platform is installed.
+- Unity switches its build target for every other platform. That reloads scripts, and Android/iOS may re-import
+  assets for a long time. At the end it switches back to the platform you started on. Keep the SDK Control Panel open.
+- The job (`vrc_upload_multi-…`) keeps its id across those reloads. When the chain ends it asks the VRChat API which
+  platforms got a new bundle and reports each one.
 
 ## Several projects at once
 

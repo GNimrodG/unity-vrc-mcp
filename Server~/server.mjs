@@ -119,8 +119,8 @@ async function call(tool, args) {
 // ---------------------------------------------------------------- tools
 
 const target = {
-  path: { type: 'string', description: "Scene GameObject path like 'Dergal/Armature/Hips', a unique object name, or '#instanceId'." },
-  assetPath: { type: 'string', description: "Asset path like 'Assets/Dergal/x.prefab' (instead of path)." },
+  path: { type: 'string', description: "Scene GameObject path like 'MyAvatar/Armature/Hips', a unique object name, or '#instanceId'." },
+  assetPath: { type: 'string', description: "Asset path like 'Assets/MyAvatar/MyAvatar.prefab' (instead of path)." },
   subAsset: { type: 'string', description: 'Name of a sub-asset inside assetPath (e.g. a mesh inside an FBX).' },
   childPath: { type: 'string', description: 'For a prefab/model assetPath: child object path inside it.' },
   component: { type: 'string', description: 'Component type name (e.g. SkinnedMeshRenderer, VRCPhysBone, VRCAvatarDescriptor). Base types match too.' },
@@ -198,7 +198,7 @@ const tools = [
   {
     name: 'find_assets',
     description: "AssetDatabase search, e.g. 't:AnimatorController', 't:Material Body', 'l:label', 't:AnimationClip Tongue'.",
-    inputSchema: obj({ filter: { type: 'string' }, folder: { type: 'string', description: "e.g. 'Assets/Dergal'" }, limit: { type: 'integer' } }, ['filter']),
+    inputSchema: obj({ filter: { type: 'string' }, folder: { type: 'string', description: "e.g. 'Assets/MyAvatar'" }, limit: { type: 'integer' } }, ['filter']),
   },
   {
     name: 'select',
@@ -317,7 +317,111 @@ const tools = [
       ignore: { type: 'array', items: { type: 'string' }, description: 'Globs to ignore (parameter, built-in or "FX/LayerName"); replaces the default list ([] = track everything).' },
     }),
   },
+
+  // ---- VRChat SDK (needs com.vrchat.avatars) ----
+  {
+    name: 'vrc_sdk_status',
+    description: 'VRChat SDK state: SDK versions, build target/platform, whether the user is logged in (and as whom), Control Panel/builder state, and the avatars in the open scenes with their blueprint ids. Login happens only in the SDK Control Panel; never ask for or handle VRChat credentials.',
+    inputSchema: obj({ openPanel: { type: 'boolean', description: 'Open the SDK Control Panel first (it logs in with saved credentials).' } }),
+  },
+  {
+    name: 'vrc_validate',
+    description: "Run the VRChat SDK's own pre-upload validation on an avatar (the errors/warnings the Control Panel shows: missing face mesh, texture/mipmap issues, face tracking mappings, project setup, ...) for the current build target. Opens the SDK Control Panel if needed.",
+    inputSchema: obj({ path: { type: 'string', description: 'Avatar root.' }, openPanel: { type: 'boolean', description: 'Default true.' } }, ['path']),
+  },
+  {
+    name: 'vrc_performance',
+    description: "VRChat performance ratings for an avatar on PC and on mobile/Quest (overall + per category, with the raw stats), using the SDK's calculator on the scene object (before VRCFury/optimizers run).",
+    inputSchema: obj({ path: { type: 'string' } }, ['path']),
+  },
+  {
+    name: 'vrc_avatar_info',
+    description: 'Read an avatar record from the VRChat API: name, description, tags, release status, version, owner, dates, thumbnail URL, and the latest uploaded bundle per platform. Pass the scene avatar (its PipelineManager blueprint id is used) or an avatarId. Needs SDK login.',
+    inputSchema: obj({ path: { type: 'string' }, avatarId: { type: 'string', description: 'avtr_... id instead of path.' } }),
+  },
+  {
+    name: 'vrc_my_avatars',
+    description: "List the logged-in user's uploaded avatars (newest update first), with release status, platforms and which scene objects use each blueprint id.",
+    inputSchema: obj({ search: { type: 'string', description: 'Name filter.' }, limit: { type: 'integer', description: '1-100, default 50.' }, offset: { type: 'integer' } }),
+  },
+  {
+    name: 'vrc_update_avatar',
+    description: "Change an uploaded avatar's name, description, tags or release status on VRChat (no rebuild). OUTWARD-FACING: without confirm it only returns a preview of the changes. Call with confirm: true only after the user has seen that preview and explicitly approved it in this conversation.",
+    inputSchema: obj({
+      path: { type: 'string' },
+      avatarId: { type: 'string' },
+      name: { type: 'string' },
+      description: { type: 'string' },
+      tags: { type: 'array', items: { type: 'string' } },
+      releaseStatus: { type: 'string', enum: ['private', 'public'] },
+      confirm: { type: 'boolean' },
+    }),
+  },
+  {
+    name: 'vrc_build',
+    description: 'Build an avatar with the VRChat SDK for the current build target WITHOUT uploading (runs VRCFury and other build hooks, so it also catches build-time errors). test: true does "Build & Test" (a local test avatar usable in VRChat on this PC). Returns the bundle path and size. Can take minutes.',
+    inputSchema: obj({ path: { type: 'string' }, test: { type: 'boolean' }, wait: { type: 'number', description: 'Seconds to wait before returning the running job (default 900).' } }, ['path']),
+  },
+  {
+    name: 'vrc_upload',
+    description: "Build and upload an avatar to VRChat as a new version of its blueprint id, or as a NEW avatar if it has none (then name is required and a 1200x900 thumbnail is captured unless given). Without platforms it uploads for the current build target only; platforms (e.g. [\"all\"] or [\"windows\",\"android\"]) runs the SDK's multi-platform chain, which switches Unity's build target per platform (script reloads, possibly long Android/iOS re-imports), uses the avatar's per-platform overrides (e.g. a separate Quest object), returns to the original platform, and verifies each platform's new bundle on the VRChat API at the end. OUTWARD-FACING: without confirm it only returns the upload plan. Only call with confirm: true when the user explicitly asked to upload this avatar (and these platforms) and approved the plan in this conversation. The SDK may show its copyright agreement dialog in Unity, which only the user may answer. Optional info changes (name, description, tags, releaseStatus) are applied with the upload.",
+    inputSchema: obj({
+      path: { type: 'string' },
+      name: { type: 'string' },
+      description: { type: 'string' },
+      tags: { type: 'array', items: { type: 'string' } },
+      releaseStatus: { type: 'string', enum: ['private', 'public'] },
+      thumbnail: { type: 'string', description: '"capture" for a new render, or an image path; default keeps the current thumbnail.' },
+      platforms: { type: 'array', items: { type: 'string', enum: ['all', 'windows', 'android', 'ios', 'pc', 'quest'] }, description: 'Platforms to upload; omit for the current build target only.' },
+      confirm: { type: 'boolean' },
+      wait: { type: 'number', description: 'Seconds to wait before returning the running job (default 1800, multi-platform 3600).' },
+    }, ['path']),
+  },
+  {
+    name: 'job_status',
+    description: "Status, progress, log and result of a background job (vrc_build, vrc_upload, vrc_upload_multi, VRChat API reads) that was still running when its tool returned. Multi-platform upload jobs survive Unity's script reloads.",
+    inputSchema: obj({ id: { type: 'string' }, wait: { type: 'number', description: 'Seconds to keep waiting for it to finish (default 0).' }, logTail: { type: 'integer' } }, ['id']),
+  },
+  {
+    name: 'job_cancel',
+    description: 'Cancel a running background job (cancels an in-progress VRChat upload).',
+    inputSchema: obj({ id: { type: 'string' } }, ['id']),
+  },
 ];
+
+const JOB_WAIT = { vrc_build: 900, vrc_upload: 1800 };
+
+/**
+ * Polls a background job until it finishes or `seconds` pass. Survives a blocked main thread (e.g. an SDK dialog) and,
+ * for jobs that outlive script reloads (multi-platform uploads), the bridge restarting while Unity switches platform.
+ */
+async function waitJob(first, seconds) {
+  let job = first;
+  const deadline = Date.now() + seconds * 1000;
+  let note = null;
+  while (job?.state === 'running' && Date.now() < deadline) {
+    await sleep(job.kind === 'vrc_upload_multi' ? 3000 : 1000);
+    try {
+      job = await call('job_status', { id: job.job, logTail: 40 });
+      note = null;
+    } catch (e) {
+      if (/main thread|did not answer/i.test(e.message))
+        note = "Unity's main thread is blocked, probably by a dialog in Unity (e.g. the VRChat SDK copyright agreement) waiting for the user.";
+      else if (e instanceof BridgeDown || /did not become idle|not reachable|reloading scripts/i.test(e.message) ||
+               (job.kind === 'vrc_upload_multi' && /No job/.test(e.message)))
+        note = 'Unity is switching platform, importing or reloading scripts.';
+      else throw e;
+    }
+  }
+  if (job?.state === 'running')
+    return { ...job, note: note ?? `Still running; check again with job_status {id: "${job.job}", wait: 1800}.` };
+  if (job?.state === 'done' && job.result?.followJob) {
+    const next = await call('job_status', { id: job.result.followJob, logTail: 40 });
+    const remaining = Math.max(0, (deadline - Date.now()) / 1000);
+    return { started: job.result, ...(await waitJob(next, Math.max(remaining, 3600))) };
+  }
+  return job;
+}
 
 async function record(args, seconds) {
   const started = await call('av3_record', { ...args, action: 'start' });
@@ -327,6 +431,16 @@ async function record(args, seconds) {
 }
 
 async function runTool(name, args) {
+  if (name === 'job_status') {
+    const job = await call(name, args);
+    return args.wait ? waitJob(job, args.wait) : job;
+  }
+  if (name.startsWith('vrc_')) {
+    const { wait, ...rest } = args;
+    const r = await call(name, rest);
+    const def = name === 'vrc_upload' && rest.platforms?.length ? 3600 : JOB_WAIT[name] ?? 120;
+    return r?.job && (r.state === 'running' || r.result?.followJob) ? waitJob(r, wait ?? def) : r;
+  }
   switch (name) {
     case 'av3_record':
       return args.seconds ? record(args, args.seconds) : call(name, args);

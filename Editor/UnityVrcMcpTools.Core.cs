@@ -44,56 +44,66 @@ namespace UnityVrcMcp.Editor
                 ["av3_set"] = Av3Set,
                 ["av3_menu"] = Av3Menu,
                 ["av3_record"] = Av3Record,
+                ["job_status"] = McpJobs.Status,
+                ["job_cancel"] = McpJobs.Cancel,
             };
 
         public static JToken Dispatch(string tool, JObject args)
         {
             if (tool == null || !Handlers.TryGetValue(tool, out var handler))
+            {
+                if (tool != null && tool.StartsWith("vrc_", StringComparison.Ordinal))
+                    throw new ArgumentException($"'{tool}' needs the VRChat Avatars SDK (com.vrchat.avatars 3.4+), which this project doesn't have.");
                 throw new ArgumentException($"Unknown tool '{tool}'. Known: {string.Join(", ", Handlers.Keys)}");
+            }
+
             return handler(args ?? new JObject());
         }
 
+        /// <summary>Lets optional assemblies (e.g. the VRChat SDK tools) add tools.</summary>
+        internal static void RegisterTool(string name, Func<JObject, JToken> handler) => Handlers[name] = handler;
+
         // ---------- argument helpers ----------
 
-        static JToken Arg(JObject a, string k) =>
+        internal static JToken Arg(JObject a, string k) =>
             a.TryGetValue(k, StringComparison.OrdinalIgnoreCase, out var t) && t.Type != JTokenType.Null ? t : null;
 
-        static string Str(JObject a, string k)
+        internal static string Str(JObject a, string k)
         {
             var t = Arg(a, k);
             var s = t?.ToString();
             return string.IsNullOrEmpty(s) ? null : s;
         }
 
-        static int Int(JObject a, string k, int d)
+        internal static int Int(JObject a, string k, int d)
         {
             var t = Arg(a, k);
             try { return t != null ? t.Value<int>() : d; }
             catch { return d; }
         }
 
-        static float Float(JObject a, string k, float d)
+        internal static float Float(JObject a, string k, float d)
         {
             var t = Arg(a, k);
             try { return t != null ? t.Value<float>() : d; }
             catch { return d; }
         }
 
-        static bool Bool(JObject a, string k, bool d)
+        internal static bool Bool(JObject a, string k, bool d)
         {
             var t = Arg(a, k);
             try { return t != null ? t.Value<bool>() : d; }
             catch { return d; }
         }
 
-        static string Required(JObject a, string k) =>
+        internal static string Required(JObject a, string k) =>
             Str(a, k) ?? throw new ArgumentException($"'{k}' is required.");
 
         // ---------- formatting helpers ----------
 
-        static double R(double v) => Math.Round(v, 4);
+        internal static double R(double v) => Math.Round(v, 4);
         static JArray V2(Vector2 v) => new JArray(R(v.x), R(v.y));
-        static JArray V3(Vector3 v) => new JArray(R(v.x), R(v.y), R(v.z));
+        internal static JArray V3(Vector3 v) => new JArray(R(v.x), R(v.y), R(v.z));
         static JArray V4(Vector4 v) => new JArray(R(v.x), R(v.y), R(v.z), R(v.w));
         static JArray Col(Color c) => new JArray(R(c.r), R(c.g), R(c.b), R(c.a));
 
@@ -105,7 +115,7 @@ namespace UnityVrcMcp.Editor
             return string.Join("/", parts);
         }
 
-        static JToken ObjRef(Object o)
+        internal static JToken ObjRef(Object o)
         {
             if (!o) return null;
             var ap = AssetDatabase.GetAssetPath(o);
@@ -953,7 +963,7 @@ namespace UnityVrcMcp.Editor
             }
         }
 
-        static JToken CaptureView(JObject a)
+        internal static JToken CaptureView(JObject a)
         {
             var w = Mathf.Clamp(Int(a, "width", 768), 64, 4096);
             var h = Mathf.Clamp(Int(a, "height", 768), 64, 4096);

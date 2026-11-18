@@ -1,7 +1,8 @@
 name: Listing
 
 # Builds the VPM repository listing (index.json) from all GitHub releases and force-pushes it to the "vpm" branch,
-# served as https://raw.githubusercontent.com/<owner>/<repo>/vpm/index.json. Works for private repos too.
+# served as https://raw.githubusercontent.com/<owner>/<repo>/vpm/index.json (works for private repos too), plus a landing
+# page with a one-click vcc: link for GitHub Pages (Settings > Pages > Deploy from branch: vpm, once the repo is public).
 # Runs after each successful Release (releases made with GITHUB_TOKEN don't trigger other workflows, workflow_run
 # does) and on demand.
 on:
@@ -37,6 +38,6 @@ jobs:
           git init -q -b vpm
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add index.json
+          git add -A
           git commit -q -m "Update VPM listing"
           git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" vpm
