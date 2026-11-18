@@ -1,0 +1,29 @@
+{
+  "name": "com.data-unknown.unity-vrc-mcp",
+  "displayName": "Unity VRC MCP",
+  "version": "1.0.0",
+  "unity": "2022.3",
+  "description": "MCP server for Claude Code (and other MCP clients) that inspects and drives the Unity editor, focused on debugging VRChat avatars: animators, expression parameters/menus and live Av3Emulator inputs and states.",
+  "author": {
+    "name": "GNimrodG",
+    "url": "https://github.com/GNimrodG"
+  },
+  "license": "MIT",
+  "documentationUrl": "https://github.com/GNimrodG/unity-vrc-mcp#readme",
+  "changelogUrl": "https://github.com/GNimrodG/unity-vrc-mcp/blob/main/CHANGELOG.md",
+  "keywords": [
+    "mcp",
+    "claude",
+    "vrchat",
+    "avatar",
+    "av3emulator",
+    "animator",
+    "debug"
+  ],
+  "vpmDependencies": {
+    "com.vrchat.base": ">=3.4.0"
+  },
+  "legacyFolders": {
+    "Assets\\ClaudeMcp": "6f8f735f4a869e84096ddf302d5c8a95"
+  }
+}

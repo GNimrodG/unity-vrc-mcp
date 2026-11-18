@@ -1,0 +1,42 @@
+name: Listing
+
+# Builds the VPM repository listing (index.json) from all GitHub releases and force-pushes it to the "vpm" branch,
+# served as https://raw.githubusercontent.com/<owner>/<repo>/vpm/index.json. Works for private repos too.
+# Runs after each successful Release (releases made with GITHUB_TOKEN don't trigger other workflows, workflow_run
+# does) and on demand.
+on:
+  workflow_run:
+    workflows: [Release]
+    types: [completed]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: listing
+  cancel-in-progress: false
+
+jobs:
+  listing:
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build listing
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/build-listing.mjs "$RUNNER_TEMP/listing"
+
+      - name: Publish to the vpm branch
+        working-directory: ${{ runner.temp }}/listing
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git init -q -b vpm
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add index.json
+          git commit -q -m "Update VPM listing"
+          git push -f "https://x-access-token:${GH_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" vpm
