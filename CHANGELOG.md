@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.2.0 - 2026-11-19
+
+- `execute_code`: compile and run a C# snippet in the editor without a script reload, so it works during play mode
+  and Av3Emulator sessions (compile approach adapted from MCP for Unity, MIT; see THIRD_PARTY_NOTICES.md).
+- `edit_animator`: undoable edits to source animator controllers (transitions and conditions, Can Transition To Self,
+  states, write defaults, parameters, layers); refuses VRCFury/optimizer output and package files.
+- `batch_execute`: up to 50 tool calls in one request.
+- MCP tool annotations (read-only / destructive / open-world hints) on every tool.
+
 ## 1.1.0 - 2026-11-18
 
 - VRChat SDK tools (only when com.vrchat.avatars 3.4+ is installed): SDK/login status, the SDK's own avatar validation,

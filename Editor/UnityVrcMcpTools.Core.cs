@@ -44,6 +44,9 @@ namespace UnityVrcMcp.Editor
                 ["av3_set"] = Av3Set,
                 ["av3_menu"] = Av3Menu,
                 ["av3_record"] = Av3Record,
+                ["execute_code"] = UnityVrcMcpExecuteCode.Execute,
+                ["batch_execute"] = BatchExecute,
+                ["edit_animator"] = EditAnimator,
                 ["job_status"] = McpJobs.Status,
                 ["job_cancel"] = McpJobs.Cancel,
             };
@@ -58,6 +61,37 @@ namespace UnityVrcMcp.Editor
             }
 
             return handler(args ?? new JObject());
+        }
+
+        const int MaxBatch = 50;
+
+        /// <summary>Runs several tools in one request (one main-thread pass), returning each result or error.</summary>
+        static JToken BatchExecute(JObject a)
+        {
+            var commands = Arg(a, "commands") as JArray ?? throw new ArgumentException("'commands' must be an array of {tool, args}.");
+            if (commands.Count > MaxBatch) throw new ArgumentException($"At most {MaxBatch} commands per batch.");
+            var stopOnError = Bool(a, "stopOnError", false);
+            var results = new JArray();
+            var failed = 0;
+            foreach (var c in commands)
+            {
+                var tool = (string)c["tool"];
+                if (string.Equals(tool, "batch_execute", StringComparison.OrdinalIgnoreCase))
+                    throw new ArgumentException("batch_execute can't be nested.");
+                try
+                {
+                    results.Add(new JObject { ["tool"] = tool, ["ok"] = true, ["result"] = Dispatch(tool, c["args"] as JObject ?? new JObject()) });
+                }
+                catch (Exception e)
+                {
+                    var inner = e is System.Reflection.TargetInvocationException tie && tie.InnerException != null ? tie.InnerException : e;
+                    failed++;
+                    results.Add(new JObject { ["tool"] = tool, ["ok"] = false, ["error"] = $"{inner.GetType().Name}: {inner.Message}" });
+                    if (stopOnError) break;
+                }
+            }
+
+            return new JObject { ["count"] = results.Count, ["failed"] = failed, ["results"] = results };
         }
 
         /// <summary>Lets optional assemblies (e.g. the VRChat SDK tools) add tools.</summary>
@@ -914,7 +948,7 @@ namespace UnityVrcMcp.Editor
             return t.ToObject(pt);
         }
 
-        static JToken ToJson(object o)
+        internal static JToken ToJson(object o)
         {
             switch (o)
             {

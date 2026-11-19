@@ -31,7 +31,7 @@ jobs:
           mkdir -p dist
           zip -r -X "dist/$NAME-$VERSION.zip" \
             package.json package.json.meta README.md README.md.meta CHANGELOG.md CHANGELOG.md.meta \
-            LICENSE LICENSE.meta Editor Editor.meta 'Server~'
+            LICENSE LICENSE.meta THIRD_PARTY_NOTICES.md THIRD_PARTY_NOTICES.md.meta Editor Editor.meta 'Server~'
           cp package.json dist/package.json
           unzip -l "dist/$NAME-$VERSION.zip"
 

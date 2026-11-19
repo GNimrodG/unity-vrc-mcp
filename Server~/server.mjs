@@ -387,7 +387,68 @@ const tools = [
     description: 'Cancel a running background job (cancels an in-progress VRChat upload).',
     inputSchema: obj({ id: { type: 'string' } }, ['id']),
   },
+
+  // ---- code, batches, animator edits ----
+  {
+    name: 'execute_code',
+    description: "Compile and run a C# snippet inside the Unity editor WITHOUT a script reload (works in the middle of play mode / Av3Emulator sessions). The code is a method body returning object (\"return x;\"); usings for System, System.Linq, System.Collections.Generic, UnityEngine, UnityEditor, UnityEditor.Animations are included, add more with usings (e.g. \"VRC.SDK3.Avatars.Components\"). Helpers: Mcp.Find(\"Avatar/Armature/Hips\") -> GameObject, Mcp.PathOf(obj), Mcp.Log(x). The result is returned as JSON (Unity objects as 'name (Type) @ path'). Unity's bundled compiler only supports older C# (about C# 7: no switch expressions, records, 'is not', target-typed new). Prefer the dedicated tools when they cover the task; changes made here are not limited or previewed, so treat outward-facing or destructive actions with the same care as the user's own editor.",
+    inputSchema: obj({
+      code: { type: 'string', description: 'Method body, e.g. "var go = Mcp.Find(\\"MyAvatar\\"); return go.GetComponentsInChildren<Renderer>().Length;"' },
+      usings: { type: 'array', items: { type: 'string' }, description: 'Extra namespaces.' },
+    }, ['code']),
+  },
+  {
+    name: 'batch_execute',
+    description: 'Run several tools in one request (one Unity main-thread pass) and get every result: e.g. inspect many objects, or set several av3 parameters at once. Each command is {tool, args}. Server-side waiting is skipped inside a batch (refresh_assets / play_mode / vrc_* only start their work; vrc_* return job ids for job_status). Max 50 commands; no nesting.',
+    inputSchema: obj({
+      commands: { type: 'array', items: { type: 'object', properties: { tool: { type: 'string' }, args: { type: 'object' } }, required: ['tool'] } },
+      stopOnError: { type: 'boolean', description: 'Stop at the first failing command (default false).' },
+    }, ['commands']),
+  },
+  {
+    name: 'edit_animator',
+    description: 'Make a targeted, undoable edit to an AnimatorController (source controllers only: refuses VRCFury build output, optimizer TrashBin copies and package files unless force). Saves the controller (save: false to skip). Actions: set_transition / add_transition / remove_transition (layer, from = state path | "AnyState" | "Entry", to = state | "Exit", index; fields: conditions ["Param", "!Param", "P > 0.5", "P == 3", "P != 3"], hasExitTime, exitTime, duration, hasFixedDuration, offset, canTransitionToSelf, interruptionSource, orderedInterruption, mute, solo), set_state / add_state / remove_state (layer, state; writeDefaults, motion asset path ("path::subAsset"), speed, speedParameter, timeParameter, default), set_write_defaults (value, optional layer = else all layers), add_parameter / set_parameter / remove_parameter (name, type Bool|Int|Float|Trigger, default; remove refuses while transitions use it unless force), set_layer (layer, weight, blending Override|Additive, mask asset path). New Any State transitions get canTransitionToSelf false; new state transitions get no exit time and 0 duration. Run inspect_animator before and after.',
+    inputSchema: obj({
+      action: { type: 'string', enum: ['set_transition', 'add_transition', 'remove_transition', 'set_state', 'add_state', 'remove_state', 'set_write_defaults', 'add_parameter', 'set_parameter', 'remove_parameter', 'set_layer'] },
+      assetPath: { type: 'string', description: 'Controller asset path.' },
+      path: { type: 'string', description: 'Avatar root (with avatarLayer) or object with an Animator.' },
+      avatarLayer: { type: 'string', description: 'FX, Gesture, Action, Base, Additive, Sitting, TPose, IKPose.' },
+      layer: { type: 'string', description: 'Layer name (exact, unique substring) or index.' },
+      from: { type: 'string' },
+      to: { type: 'string' },
+      index: { type: 'integer', description: 'Which of the matching transitions (0-based).' },
+      state: { type: 'string' },
+      name: { type: 'string', description: 'Parameter name.' },
+      type: { type: 'string', enum: ['Bool', 'Int', 'Float', 'Trigger'] },
+      default: { description: 'Parameter default value, or true to make an added state the default state.' },
+      value: { type: 'boolean', description: 'For set_write_defaults.' },
+      conditions: { type: 'array', items: { type: 'string' } },
+      hasExitTime: { type: 'boolean' }, exitTime: { type: 'number' }, duration: { type: 'number' }, hasFixedDuration: { type: 'boolean' },
+      offset: { type: 'number' }, canTransitionToSelf: { type: 'boolean' }, orderedInterruption: { type: 'boolean' },
+      interruptionSource: { type: 'string', enum: ['None', 'Source', 'Destination', 'SourceThenDestination', 'DestinationThenSource'] },
+      mute: { type: 'boolean' }, solo: { type: 'boolean' },
+      writeDefaults: { type: 'boolean' }, motion: { type: ['string', 'null'] }, speed: { type: 'number' },
+      speedParameter: { type: ['string', 'null'] }, timeParameter: { type: ['string', 'null'] },
+      weight: { type: 'number' }, blending: { type: 'string', enum: ['Override', 'Additive'] }, mask: { type: ['string', 'null'] },
+      allowMissingParameters: { type: 'boolean' }, force: { type: 'boolean' }, save: { type: 'boolean' },
+    }, ['action']),
+  },
 ];
+
+// MCP tool annotations (hints for clients): read-only tools, and tools that change things outside the editor.
+const READ_ONLY = new Set([
+  'unity_status', 'console_logs', 'hierarchy', 'find_objects', 'inspect_object', 'find_assets', 'avatar_report',
+  'inspect_animator', 'inspect_clip', 'capture_view', 'av3_state', 'av3_menu', 'vrc_sdk_status', 'vrc_performance',
+  'vrc_avatar_info', 'vrc_my_avatars', 'job_status',
+]);
+const DESTRUCTIVE = new Set(['vrc_upload', 'vrc_update_avatar', 'execute_code', 'invoke_static_method', 'execute_menu_item', 'edit_animator', 'set_property']);
+const OPEN_WORLD = new Set(['vrc_upload', 'vrc_update_avatar', 'vrc_avatar_info', 'vrc_my_avatars']);
+for (const t of tools) {
+  const title = t.name.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
+  t.annotations = READ_ONLY.has(t.name)
+    ? { title, readOnlyHint: true, openWorldHint: OPEN_WORLD.has(t.name) }
+    : { title, readOnlyHint: false, destructiveHint: DESTRUCTIVE.has(t.name), openWorldHint: OPEN_WORLD.has(t.name) };
+}
 
 const JOB_WAIT = { vrc_build: 900, vrc_upload: 1800 };
 

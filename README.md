@@ -51,6 +51,8 @@ or updating the package.
 | Avatar (edit mode) | `avatar_report`, `inspect_animator` (write defaults, condition/parameter checks, clip bindings vs. the avatar), `inspect_clip`, `av3_menu` |
 | Av3Emulator (play mode) | `av3_state`, `av3_set`, `av3_record`, `av3_menu` (with live values) |
 | VRChat SDK | `vrc_sdk_status`, `vrc_validate`, `vrc_performance`, `vrc_avatar_info`, `vrc_my_avatars`, `vrc_build`, `vrc_upload`, `vrc_update_avatar` |
+| Animator fixes | `edit_animator` (transitions, conditions, states, write defaults, parameters, layers) |
+| Code and batches | `execute_code` (C# without a script reload), `batch_execute` |
 | Background jobs | `job_status`, `job_cancel` |
 
 Typical Av3 debugging flow:
@@ -95,6 +97,23 @@ Without `platforms`, `vrc_upload` uploads for the editor's current build target.
 - The job (`vrc_upload_multi-…`) keeps its id across those reloads. When the chain ends it asks the VRChat API which
   platforms got a new bundle and reports each one.
 
+## Fixing animators, running code
+
+- `edit_animator` makes targeted, undoable edits to a controller: set or add or remove transitions (conditions such as
+  `"Toggle"`, `"!Toggle"`, `"Param > 0.5"`, exit time, duration, Can Transition To Self, interruption), states (motion,
+  write defaults, speed and time parameters), write defaults for a layer or the whole controller, parameters and layer
+  settings. It refuses generated controllers (VRCFury build output, optimizer copies, package files) because those edits
+  would be lost on the next build, rejects `==` on Float parameters, and won't remove a parameter that transitions still
+  use. New Any State transitions start with Can Transition To Self off.
+- `execute_code` compiles a C# snippet with the compiler Unity ships and runs it in the editor. Nothing is written to
+  `Assets/` and scripts don't reload, so it also works during play mode and Av3Emulator sessions. The snippet is a
+  method body returning a value; `Mcp.Find(path)`, `Mcp.PathOf(obj)` and `Mcp.Log(x)` help with scene objects. Unity's
+  bundled compiler only understands older C# (about C# 7).
+- `batch_execute` runs up to 50 tool calls in one request.
+
+All tools carry MCP annotations (`readOnlyHint`, `destructiveHint`, `openWorldHint`), so clients can tell the
+read-only ones from those that change the project or VRChat.
+
 ## Several projects at once
 
 Each open Unity project needs its own port. Put the number in `ProjectSettings/UnityVrcMcpPort.txt`; the MCP server
@@ -112,3 +131,8 @@ Bump `version` in `package.json`, add a `CHANGELOG.md` entry, then push a tag `v
 builds the zip and creates the GitHub release; the `Listing` workflow then rebuilds `index.json` from all releases and
 force-pushes it to the `vpm` branch. If the repository becomes public, run `Listing` once (Actions → Listing → Run
 workflow) so the zip URLs switch to plain download links that need no token.
+
+## Credits
+
+`execute_code`'s compile approach is adapted from [MCP for Unity](https://github.com/CoplayDev/unity-mcp) by CoplayDev
+(MIT); see `THIRD_PARTY_NOTICES.md`.
