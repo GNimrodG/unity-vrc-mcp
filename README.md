@@ -46,10 +46,11 @@ or updating the package.
 
 | Area | Tools |
 |---|---|
-| Editor | `unity_status`, `console_logs`, `refresh_assets`, `play_mode`, `execute_menu_item`, `invoke_static_method` |
+| Editor | `unity_status`, `console_logs`, `refresh_assets`, `play_mode`, `execute_menu_item`, `invoke_static_method`, `editor_prefs` |
 | Scene and assets | `hierarchy`, `find_objects`, `inspect_object`, `set_property`, `blendshapes`, `find_assets`, `select`, `capture_view` |
 | Avatar (edit mode) | `avatar_report`, `inspect_animator` (write defaults, condition/parameter checks, clip bindings vs. the avatar), `inspect_clip`, `av3_menu` |
-| Av3Emulator (play mode) | `av3_state`, `av3_set`, `av3_record`, `av3_menu` (with live values) |
+| Av3Emulator (play mode) | `av3_state`, `av3_set` (with read-back, VRCFury twins, hold), `av3_record`, `av3_menu` (with live values), `ft_set` (native face tracking simulation) |
+| Snapshots | `snapshot` (blendshapes, bones, parameters; diff with tolerances) |
 | VRChat SDK | `vrc_sdk_status`, `vrc_validate`, `vrc_performance`, `vrc_avatar_info`, `vrc_my_avatars`, `vrc_build`, `vrc_upload`, `vrc_update_avatar` |
 | Animator fixes | `edit_animator` (transitions, conditions, states, write defaults, parameters, layers) |
 | Code and batches | `execute_code` (C# without a script reload), `batch_execute` |

@@ -63,7 +63,8 @@ async function http(method, pathname, body, timeoutMs = 130_000) {
   }
   const text = await res.text();
   let json;
-  try { json = JSON.parse(text); } catch { throw new Error(`Bad response (HTTP ${res.status}): ${text.slice(0, 500)}`); }
+  // A non-JSON answer (HTTP.sys "Invalid host" or an empty body) comes from a listener being torn down during a reload.
+  try { json = JSON.parse(text); } catch { throw new BridgeDown(`Unity bridge restarting (HTTP ${res.status}: ${text.slice(0, 200) || 'empty reply'}).`); }
   if (res.status === 401) throw new Error('Bridge rejected the token (another Unity project on this port?).');
   return json;
 }
@@ -194,7 +195,7 @@ const tools = [
   },
   {
     name: 'set_property',
-    description: 'Set a serialized property on a component or asset (undoable, not saved). Values: number, bool, string, enum name, [x,y,z], [r,g,b,a] or "#hex", object reference as asset path ("Assets/a.fbx::MeshName" for sub-assets) or scene path, null. An int on an array property sets its size.',
+    description: 'Set a serialized property on a component or asset (undoable, not saved). Values: number, bool, string, enum name, [x,y,z], [r,g,b,a] or "#hex", object reference as asset path ("Assets/a.fbx::MeshName" for sub-assets) or scene path, null. An int on an array property sets its size. GameObject fields: leave component out (or "GameObject") and use property active, tag, layer or name (m_IsActive, m_TagString, m_Layer, m_Name work too); undoable, recorded as prefab overrides, and also in play mode.',
     inputSchema: obj({ ...target, property: { type: 'string' }, value: {} }, ['property', 'value']),
   },
   {
@@ -234,8 +235,11 @@ const tools = [
       assetPath: { type: 'string', description: 'Controller asset path.' },
       path: { type: 'string', description: 'GameObject with an Animator, or the avatar root together with avatarLayer.' },
       avatarLayer: { type: 'string', description: 'Read the controller from the VRCAvatarDescriptor: Base, Additive, Gesture, Action, FX, Sitting, TPose, IKPose.' },
-      layer: { type: 'string', description: 'Only detail layers whose name contains this.' },
+      layer: { type: 'string', description: 'Only detail layers whose name contains this; parameters, issues and the binding check are limited to those layers too.' },
       detail: { type: 'string', enum: ['summary', 'states', 'full'], description: 'summary = layers only, states (default) = + states, full = + transitions and behaviour fields.' },
+      maxTreeDepth: { type: 'integer', description: 'Blend tree levels to print (default 2, full: 4); deeper trees are still checked.' },
+      maxChildren: { type: 'integer', description: 'Blend tree children printed per tree (default 12, full: 24).' },
+      maxStates: { type: 'integer', description: 'States printed per layer (default 120).' },
       bindingRoot: { type: 'string', description: 'Avatar root to validate clip bindings against (defaults to path).' },
       checkBindings: { type: 'boolean', description: 'Default true when a root is known.' },
     }),
@@ -267,7 +271,7 @@ const tools = [
   },
   {
     name: 'play_mode',
-    description: 'Enter/exit/pause play mode (Av3Emulator / Gesture Manager testing). Waits for the domain reload to finish.',
+    description: 'Enter/exit/pause play mode (Av3Emulator / Gesture Manager testing). play/stop wait until the editor is in the new state and idle (domain reload and build hooks included) and return the final isPlaying.',
     inputSchema: obj({ state: { type: 'string', enum: ['play', 'stop', 'pause', 'resume', 'step'] } }, ['state']),
   },
   {
@@ -293,10 +297,12 @@ const tools = [
   // ---- Av3Emulator (play mode) ----
   {
     name: 'av3_state',
-    description: 'PLAY MODE, Av3Emulator: live state of the emulated avatar: built-in inputs (GestureLeft/Right + weights, Viseme, Voice, IsLocal, Grounded, Seated, AFK, VRMode, TrackingType, InStation, ...), every animator/expression parameter value, and for each playable layer (Base/Additive/Gesture/Action/FX/...) its weight plus each animator layer\'s weight, current state (and "-> next" during transitions) and normalized time; tracking control state.',
+    description: 'PLAY MODE, Av3Emulator: live state of the emulated avatar: built-in inputs (GestureLeft/Right + weights, Viseme, Voice, IsLocal, Grounded, Seated, AFK, VRMode, TrackingType, InStation, ...), every parameter value as the animator playables see it (curveDriven lists parameters animated by curves (AAPs) with the playable; playablesDisagree and emulatorListDiffers show diverging or stale values), held parameters, which build hooks made each controller (VRCFury, d4rkAvatarOptimizer), and for each playable layer (Base/Additive/Gesture/Action/FX/...) its weight plus each animator layer\'s weight, current state (and "-> next" during transitions) and normalized time; tracking control state.',
     inputSchema: obj({
       path: { type: 'string', description: 'Avatar root (default: the local emulated avatar).' },
       params: { type: 'string', description: 'Only parameters whose name contains this.' },
+      names: { type: 'array', items: { type: 'string' }, description: 'Only these exact parameter/built-in names.' },
+      source: { type: 'string', enum: ['live', 'emulator'], description: "live (default): read the animator playables; emulator: the emulator's own parameter lists (stale for curve-driven parameters)." },
       layer: { type: 'string', description: 'Only playables/animator layers whose name contains this (e.g. FX, or a layer name).' },
       includeParams: { type: 'boolean', description: 'Default true.' },
       includeLayers: { type: 'boolean', description: 'Default true.' },
@@ -304,10 +310,14 @@ const tools = [
   },
   {
     name: 'av3_set',
-    description: 'PLAY MODE, Av3Emulator: set avatar inputs like VRChat would. params: built-ins (GestureLeft: "Fist"/0-7, GestureLeftWeight, Viseme, Voice, IsLocal, Grounded, Seated, AFK, VRMode, TrackingType, InStation, VelocityX, ...) and any animator/expression parameter (bool/int/float; floats also update the menu value). fields: other public LyumaAv3Runtime fields (e.g. ResetAvatar: true, EnableHeadScaling). With observeSeconds, records what changes afterwards (parameter drivers, state transitions, layer weights).',
+    description: 'PLAY MODE, Av3Emulator: set avatar inputs like VRChat would. params: built-ins (GestureLeft: "Fist"/0-7, GestureLeftWeight, Viseme, Voice, IsLocal, Grounded, Seated, AFK, VRMode, TrackingType, InStation, VelocityX, ...) and any animator/expression parameter (bool/int/float; floats also update the menu value). Values go into the emulator and straight into the animator playables, the VRCFury renamed copies (VFnn_<name>) are set too, and ~0.3 s later the live values are read back: "reverted" lists parameters something changed back (a VRCFury parameter compressor, a driver, a curve). hold: true re-applies the values every frame before the animators run, until release. fields: other public LyumaAv3Runtime fields (e.g. ResetAvatar: true, EnableHeadScaling). With observeSeconds, records what changes afterwards (parameter drivers, state transitions, layer weights).',
     inputSchema: obj({
       path: { type: 'string' },
       params: { type: 'object', description: 'name -> value' },
+      hold: { type: 'boolean', description: 'Keep these values: re-apply every frame until release (or play mode ends).' },
+      release: { description: 'Stop holding: a name, a list of names, or "all" / true.' },
+      twins: { type: 'boolean', description: 'Also set VRCFury VFnn_<name> copies (default true).' },
+      verify: { type: 'boolean', description: 'Read the live values back after ~0.3 s (default true).' },
       fields: { type: 'object', description: 'LyumaAv3Runtime field -> value' },
       observeSeconds: { type: 'number', description: 'Record changes for this long after setting (default 0 = just set).' },
       only: { type: 'array', items: { type: 'string' }, description: 'With observeSeconds: only track names matching these globs.' },
@@ -316,8 +326,13 @@ const tools = [
   },
   {
     name: 'av3_menu',
-    description: 'Expression menu tree of the avatar (controls, type, parameter, value, sub-parameters, submenus). In play mode includes each parameter\'s current runtime value and flags parameters missing from the runtime (a common reason a toggle "does nothing").',
-    inputSchema: obj({ path: { type: 'string' }, maxDepth: { type: 'integer' } }),
+    description: 'Expression menu of the avatar (controls, type, parameter, value, sub-parameters, submenus), two levels deep by default: menuPath opens a submenu, find searches the whole tree. In play mode includes each parameter\'s live value and flags parameters missing from the runtime (a common reason a toggle "does nothing").',
+    inputSchema: obj({
+      path: { type: 'string' },
+      menuPath: { type: 'string', description: 'Submenu by control names, e.g. "Avatar/Face Tracking" (substrings match).' },
+      find: { type: 'string', description: 'Flat list of controls (with their menu path) whose name or parameter matches this (substring or glob).' },
+      maxDepth: { type: 'integer', description: 'Submenu levels to expand (default 2, 3 with menuPath).' },
+    }),
   },
   {
     name: 'av3_record',
@@ -329,7 +344,49 @@ const tools = [
       set: { type: 'object', description: 'Params to apply right after recording starts.' },
       only: { type: 'array', items: { type: 'string' }, description: 'Only track names matching these globs, e.g. ["Horns*", "FX/Horns"].' },
       ignore: { type: 'array', items: { type: 'string' }, description: 'Globs to ignore (parameter, built-in or "FX/LayerName"); replaces the default list ([] = track everything).' },
+      blendshapes: { description: 'Also record blendshape weights: true, or globs on shape names or "Renderer/Shape" (e.g. ["Body/Jaw*", "Eye*"]).' },
+      bones: { description: 'Also record local rotation/position of every transform under these bones: humanoid names (Head, Jaw, LeftEye) or paths under the avatar.' },
     }),
+  },
+  {
+    name: 'ft_set',
+    description: "PLAY MODE, Av3Emulator: simulate VRChat's native face tracking (descriptor Face Tracking, SDK 3.10+), which the emulators don't: give Unified Expressions key values and it drives the descriptor's Blendshapes Sets (max per shape of key x multiplier x set weight), evaluates Forward to Animator custom expressions into animator parameters, and turns the eye bones toward the Eye Look states for EyeLook* keys. Held every frame until the next ft_set or stop; keys not given are 0 unless merge. Eyelids, visemes via face tracking and non-Custom behaviors aren't simulated.",
+    inputSchema: obj({
+      path: { type: 'string' },
+      keys: { type: 'object', description: 'Unified Expressions key -> 0..1, e.g. {JawOpen: 1, EyeLookUpLeft: 0.5}.' },
+      merge: { type: 'boolean', description: 'Keep the previous keys and change only these.' },
+      stop: { type: 'boolean', description: 'End the simulation and restore blendshapes and eye rotations.' },
+      reload: { type: 'boolean', description: 'Re-read the descriptor.' },
+      listKeys: { type: 'boolean', description: "List the SDK's FaceTrackingKey names." },
+      limit: { type: 'integer', description: 'Driven blendshapes to list (default 40).' },
+    }),
+  },
+  {
+    name: 'snapshot',
+    description: 'Capture blendshape weights, local transforms under bones and (play mode) live animator parameters, optionally saved by name, and diff two snapshots (or a saved one against now) with tolerances. Edit or play mode. A/B test: capture {name: "a", blendshapes: ["Body/*"], bones: "Head"}, change something, diff {from: "a"}.',
+    inputSchema: obj({
+      action: { type: 'string', enum: ['capture', 'diff', 'list', 'clear'], description: 'Default capture.' },
+      path: { type: 'string', description: 'Root object (default: the emulated avatar in play mode, or the only avatar in the scene).' },
+      name: { type: 'string', description: 'capture: save under this name.' },
+      blendshapes: { description: 'true for all, or globs on shape names or "Renderer/Shape".' },
+      bones: { description: 'Humanoid bone name(s) (Head, Jaw, LeftEye) or path(s) under the root; captures every transform below.' },
+      params: { description: 'Play mode: true or globs of animator parameters.' },
+      includeZero: { type: 'boolean', description: 'capture: also list blendshapes at 0.' },
+      from: { type: 'string', description: 'diff: saved snapshot name.' },
+      to: { type: 'string', description: 'diff: saved snapshot to compare with (default: capture the same things now).' },
+      tolerance: { type: 'object', description: 'diff: {shape: 0.5, angle: 0.5 (degrees), position: 0.0005 (m), param: 0.001}.' },
+      limit: { type: 'integer', description: 'Max values or changes listed (default 150).' },
+    }),
+  },
+  {
+    name: 'editor_prefs',
+    description: 'Read, write or delete a Unity EditorPrefs key (editor settings of packages such as Av3Emulator, VRCFury or the SDK).',
+    inputSchema: obj({
+      key: { type: 'string' },
+      action: { type: 'string', enum: ['get', 'set', 'delete'], description: 'Default get.' },
+      type: { type: 'string', enum: ['bool', 'int', 'float', 'string'], description: 'EditorPrefs stores no type; without it get shows the readings.' },
+      value: {},
+    }, ['key']),
   },
 
   // ---- VRChat SDK (needs com.vrchat.avatars) ----
@@ -453,10 +510,10 @@ const tools = [
 // MCP tool annotations (hints for clients): read-only tools, and tools that change things outside the editor.
 const READ_ONLY = new Set([
   'unity_status', 'console_logs', 'hierarchy', 'find_objects', 'inspect_object', 'find_assets', 'avatar_report',
-  'inspect_animator', 'inspect_clip', 'capture_view', 'av3_state', 'av3_menu', 'vrc_sdk_status', 'vrc_performance',
+  'inspect_animator', 'inspect_clip', 'capture_view', 'av3_state', 'av3_menu', 'snapshot', 'vrc_sdk_status', 'vrc_performance',
   'vrc_avatar_info', 'vrc_my_avatars', 'job_status',
 ]);
-const DESTRUCTIVE = new Set(['vrc_upload', 'vrc_update_avatar', 'execute_code', 'invoke_static_method', 'execute_menu_item', 'edit_animator', 'set_property']);
+const DESTRUCTIVE = new Set(['vrc_upload', 'vrc_update_avatar', 'execute_code', 'invoke_static_method', 'execute_menu_item', 'edit_animator', 'set_property', 'editor_prefs']);
 const OPEN_WORLD = new Set(['vrc_upload', 'vrc_update_avatar', 'vrc_avatar_info', 'vrc_my_avatars']);
 for (const t of tools) {
   const title = t.name.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
@@ -511,6 +568,56 @@ async function record(args, seconds) {
   return { ...started, ...log };
 }
 
+/** av3_set, then read the live values back a few frames later and report what was changed back. */
+async function setAndVerify(args) {
+  const { verify = true, ...rest } = args;
+  const r = await call('av3_set', rest);
+  if (!verify || !r?.expected || !Object.keys(r.expected).length) {
+    if (r) delete r.expected;
+    return r;
+  }
+  await sleep(300); // let the emulator and the animators run a few frames
+  const st = await call('av3_state', { path: rest.path, names: Object.keys(r.expected), includeLayers: false });
+  const live = st.parameters ?? {};
+  const num = (v) => (v === true ? 1 : v === false ? 0 : Number(v));
+  const reverted = Object.entries(r.expected)
+    .filter(([k, v]) => k in live && Math.abs(num(live[k]) - v) > 0.01)
+    .map(([k, v]) => `${k}: set ${v}, now ${live[k]}`);
+  delete r.expected;
+  r.live = live;
+  if (reverted.length) {
+    r.reverted = reverted;
+    r.revertedNote = rest.hold
+      ? 'Changed between frames although held: the hold re-applies it before every animator update, so the animators still see the value.'
+      : 'Something changed these back (VRCFury parameter compressor, parameter driver, curve). hold: true keeps them.';
+  }
+  return r;
+}
+
+/** play/stop: wait for the state to flip (entering play reloads scripts and runs build hooks), then for idle. */
+async function playMode(args) {
+  const r = await call('play_mode', args);
+  if (!['play', 'stop'].includes(args.state)) return r;
+  const want = args.state === 'play';
+  const start = Date.now();
+  let h = null;
+  while (Date.now() - start < 180_000) {
+    try {
+      h = await health();
+      if (h.isPlaying === want && !h.isCompiling && !h.isUpdating) break;
+    } catch (e) {
+      if (!(e instanceof BridgeDown)) throw e;
+    }
+    await sleep(500);
+  }
+  if (h?.isPlaying === want) h = await waitIdle(60_000, 500);
+  const { wasPlaying, ...rest } = r;
+  const out = { ...rest, isPlaying: h?.isPlaying ?? null };
+  if (h?.isPlaying !== want)
+    out.warning = `Play mode is still ${h?.isPlaying ? 'on' : 'off'} after ${Math.round((Date.now() - start) / 1000)}s (console_logs: a build hook may have failed).`;
+  return out;
+}
+
 async function runTool(name, args) {
   if (name === 'job_status') {
     const job = await call(name, args);
@@ -526,7 +633,7 @@ async function runTool(name, args) {
     case 'av3_record':
       return args.seconds ? record(args, args.seconds) : call(name, args);
     case 'av3_set': {
-      if (!args.observeSeconds) return call(name, args);
+      if (!args.observeSeconds) return setAndVerify(args);
       const { observeSeconds, params, ...rest } = args;
       const r = rest.fields ? await call(name, { path: rest.path, fields: rest.fields }) : {};
       return { ...r, ...(await record({ path: rest.path, set: params, only: rest.only, ignore: rest.ignore }, observeSeconds)) };
@@ -536,15 +643,8 @@ async function runTool(name, args) {
       await waitIdle();
       return { status: await call('unity_status', {}) };
     }
-    case 'play_mode': {
-      const r = await call(name, args);
-      if (['play', 'stop'].includes(args.state)) {
-        await sleep(1000);
-        await waitIdle(120_000, 1000);
-        r.isPlayingNow = (await health()).isPlaying;
-      }
-      return r;
-    }
+    case 'play_mode':
+      return playMode(args);
     default:
       return call(name, args);
   }

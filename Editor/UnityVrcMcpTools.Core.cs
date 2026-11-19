@@ -44,6 +44,9 @@ namespace UnityVrcMcp.Editor
                 ["av3_set"] = Av3Set,
                 ["av3_menu"] = Av3Menu,
                 ["av3_record"] = Av3Record,
+                ["ft_set"] = FtSet,
+                ["snapshot"] = SnapshotTool,
+                ["editor_prefs"] = EditorPrefsTool,
                 ["execute_code"] = UnityVrcMcpExecuteCode.Execute,
                 ["batch_execute"] = BatchExecute,
                 ["edit_animator"] = EditAnimator,
@@ -292,6 +295,7 @@ namespace UnityVrcMcp.Editor
 
             if (comp == null) return obj;
             if (!(obj is GameObject go)) throw new ArgumentException("'component' only applies to GameObjects.");
+            if (comp.Equals("GameObject", StringComparison.OrdinalIgnoreCase)) return go;
             var comps = go.GetComponents<Component>().Where(c => c != null && TypeMatches(c.GetType(), comp)).ToList();
             if (comps.Count == 0)
                 throw new ArgumentException($"No '{comp}' on {GetPath(go.transform)}. Components: " +
@@ -705,6 +709,7 @@ namespace UnityVrcMcp.Editor
             var target = ResolveTarget(a);
             var prop = Required(a, "property");
             var value = a.TryGetValue("value", StringComparison.OrdinalIgnoreCase, out var v) ? v : throw new ArgumentException("'value' is required (may be null).");
+            if (target is GameObject go && SetGameObjectField(go, prop, value) is JObject done) return done;
             var so = new SerializedObject(target);
             var p = so.FindProperty(prop) ?? throw new ArgumentException($"Property '{prop}' not found on {ObjRef(target)}. Use inspect_object to list property names.");
             var shallow = new DumpOpts { MaxDepth = 1, MaxArray = 8 };
@@ -717,6 +722,55 @@ namespace UnityVrcMcp.Editor
                 ["target"] = ObjRef(target), ["property"] = prop,
                 ["before"] = before, ["after"] = DumpProperty(so.FindProperty(prop), 0, shallow),
                 ["note"] = "Not saved yet: save the scene/assets in Unity (or Ctrl+Z to undo).",
+            };
+        }
+
+        /// <summary>active / tag / layer / name (or their m_ names) on a GameObject, through its own API so play mode works too.</summary>
+        static JObject SetGameObjectField(GameObject go, string prop, JToken value)
+        {
+            var key = prop.StartsWith("m_", StringComparison.Ordinal) ? prop.Substring(2) : prop;
+            object before;
+            switch (key.ToLowerInvariant())
+            {
+                case "isactive":
+                case "active":
+                    before = go.activeSelf;
+                    Undo.RecordObject(go, "Set active");
+                    go.SetActive(value.Value<bool>());
+                    break;
+                case "tagstring":
+                case "tag":
+                    before = go.tag;
+                    var tag = value.ToString();
+                    if (!UnityEditorInternal.InternalEditorUtility.tags.Contains(tag))
+                        throw new ArgumentException($"Tag '{tag}' doesn't exist. Tags: {string.Join(", ", UnityEditorInternal.InternalEditorUtility.tags)}");
+                    Undo.RecordObject(go, "Set tag");
+                    go.tag = tag;
+                    break;
+                case "layer":
+                    before = LayerMask.LayerToName(go.layer);
+                    var layer = value.Type == JTokenType.Integer ? value.Value<int>() : LayerMask.NameToLayer(value.ToString());
+                    if (layer < 0 || layer > 31) throw new ArgumentException($"No layer '{value}'.");
+                    Undo.RecordObject(go, "Set layer");
+                    go.layer = layer;
+                    break;
+                case "name":
+                    before = go.name;
+                    Undo.RecordObject(go, "Rename");
+                    go.name = value.ToString();
+                    break;
+                default:
+                    return null;
+            }
+
+            if (!Application.isPlaying) EditorUtility.SetDirty(go);
+            if (!Application.isPlaying && go.scene.IsValid()) UnityEditor.SceneManagement.EditorSceneManager.MarkSceneDirty(go.scene);
+            if (PrefabUtility.IsPartOfPrefabInstance(go)) PrefabUtility.RecordPrefabInstancePropertyModifications(go);
+            return new JObject
+            {
+                ["target"] = ObjRef(go), ["property"] = prop, ["before"] = JToken.FromObject(before),
+                ["after"] = key.ToLowerInvariant().Contains("active") ? go.activeSelf : key.ToLowerInvariant().Contains("tag") ? (JToken)go.tag : key == "layer" ? LayerMask.LayerToName(go.layer) : go.name,
+                ["note"] = Application.isPlaying ? "Play mode: lost when play mode ends." : "Not saved yet: save the scene in Unity (or Ctrl+Z to undo).",
             };
         }
 
@@ -888,7 +942,8 @@ namespace UnityVrcMcp.Editor
                 default: throw new ArgumentException("state must be play, stop, pause, resume or step.");
             }
 
-            return new JObject { ["requested"] = Str(a, "state"), ["isPlaying"] = EditorApplication.isPlaying };
+            // play/stop finish on a later frame (after a script reload when entering play): the MCP server waits for the final state
+            return new JObject { ["requested"] = Str(a, "state"), ["wasPlaying"] = EditorApplication.isPlaying };
         }
 
         static JToken RefreshAssets(JObject a)

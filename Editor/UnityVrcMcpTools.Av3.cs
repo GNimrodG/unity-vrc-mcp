@@ -174,31 +174,63 @@ namespace UnityVrcMcp.Editor
             var rt = FindRuntime(a);
             var paramFilter = Str(a, "params");
             var layerFilter = Str(a, "layer");
+            var names = (Arg(a, "names") as JArray)?.Select(x => x.ToString()).ToList();
             var res = new JObject { ["avatar"] = GetPath(rt.transform) };
 
             var inputs = new JObject();
             foreach (var (name, def) in Builtins())
             {
+                if (names != null && !names.Contains(name)) continue;
+                if (names == null && paramFilter != null && name.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) < 0) continue;
                 try { inputs[name] = J(((Delegate)Get(def, "valueGetter")).DynamicInvoke(rt)); }
                 catch { /* some getters need state that isn't ready */ }
             }
 
-            if (inputs["GestureLeft"] != null) inputs["GestureLeft"] = $"{inputs["GestureLeft"]} ({Get(rt, "GestureLeft")})";
+            if (inputs.Count > 0 && inputs["GestureLeft"] != null) inputs["GestureLeft"] = $"{inputs["GestureLeft"]} ({Get(rt, "GestureLeft")})";
             if (inputs["GestureRight"] != null) inputs["GestureRight"] = $"{inputs["GestureRight"]} ({Get(rt, "GestureRight")})";
             res["builtins"] = inputs;
 
             if (Bool(a, "includeParams", true))
             {
+                bool Wanted(string name) =>
+                    !string.IsNullOrEmpty(name) && inputs[name] == null && (names == null || names.Contains(name)) &&
+                    (paramFilter == null || name.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) >= 0);
+
+                var emulator = RuntimeParams(rt).Where(p => p.name != null).GroupBy(p => p.name).ToDictionary(g => g.Key, g => g.First().value);
+                var live = LiveParams(rt);
+                var useLive = live.Count > 0 && !string.Equals(Str(a, "source"), "emulator", StringComparison.OrdinalIgnoreCase);
                 var ps = new JObject();
-                foreach (var (name, value, _, _) in RuntimeParams(rt))
+                if (useLive)
                 {
-                    if (string.IsNullOrEmpty(name) || inputs[name] != null) continue;
-                    if (paramFilter != null && name.IndexOf(paramFilter, StringComparison.OrdinalIgnoreCase) < 0) continue;
-                    ps[name] = J(value);
+                    var curve = new JObject();
+                    var disagree = new JObject();
+                    var stale = new JObject();
+                    foreach (var lp in live.Values.Where(p => Wanted(p.Name)).OrderBy(p => p.Name, StringComparer.Ordinal))
+                    {
+                        ps[lp.Name] = J(lp.Value);
+                        if (lp.CurveIn.Count > 0) curve[lp.Name] = string.Join(", ", lp.CurveIn);
+                        if (Disagree(lp)) disagree[lp.Name] = new JObject(lp.BySource.Select(kv => new JProperty(kv.Key, J(kv.Value))));
+                        if (emulator.TryGetValue(lp.Name, out var ev) && Math.Abs(Num(ev) - Num(lp.Value)) > 1e-3 && stale.Count < 30)
+                            stale[lp.Name] = $"emulator {J(ev)}, animator {J(lp.Value)}";
+                    }
+
+                    foreach (var kv in emulator.Where(kv => Wanted(kv.Key) && !live.ContainsKey(kv.Key)))
+                        ps[kv.Key] = J(kv.Value); // expression parameters no controller uses
+                    res["source"] = "live animator playables (curve-driven values first, then FX); source: \"emulator\" for the emulator's own lists";
+                    if (curve.Count > 0) res["curveDriven"] = curve;
+                    if (disagree.Count > 0) res["playablesDisagree"] = disagree;
+                    if (stale.Count > 0) res["emulatorListDiffers"] = stale;
+                }
+                else
+                {
+                    foreach (var kv in emulator.Where(kv => Wanted(kv.Key))) ps[kv.Key] = J(kv.Value);
+                    res["source"] = live.Count == 0 ? "emulator lists (the playables don't exist yet)" : "emulator lists";
                 }
 
                 res["parameters"] = ps;
             }
+
+            if (HoldsJson() is JObject held) res["held"] = held;
 
             if (Bool(a, "includeLayers", true))
             {
@@ -221,6 +253,13 @@ namespace UnityVrcMcp.Editor
                 }
 
                 res["playableLayers"] = layers;
+            }
+
+            if (names == null)
+            {
+                var outputs = BuildOutputs(GetPlayables(rt).Select(pi => (pi.Type, (Object)pi.Controller)));
+                if (outputs.Count > 0) res["controllersBuiltBy"] = outputs;
+                if (BuildNote(outputs) is string note) res["buildNote"] = note;
             }
 
             var flags = new JObject();
@@ -255,7 +294,11 @@ namespace UnityVrcMcp.Editor
             }
         }
 
-        internal static JArray Av3Apply(Component rt, JObject values)
+        /// <summary>
+        /// Sets built-ins and parameters (plus VRCFury VFnn_ twins unless <paramref name="twins"/> is false), writing the
+        /// playables directly. <paramref name="expected"/> collects name -> value for a later read-back.
+        /// </summary>
+        internal static JArray Av3Apply(Component rt, JObject values, JObject expected = null, bool twins = true, string holdOwner = null)
         {
             var applied = new JArray();
             var builtins = Builtins().ToDictionary(b => b.name, b => b.def, StringComparer.OrdinalIgnoreCase);
@@ -274,29 +317,44 @@ namespace UnityVrcMcp.Editor
                     continue;
                 }
 
-                var found = false;
-                foreach (var (list, kind) in new[] { ("Bools", "Bool"), ("Ints", "Int"), ("Floats", "Float") })
+                var kindSet = WriteRuntimeParam(rt, name, v);
+                if (kindSet == null && twins && Twins(rt, name).ToList() is var only && only.Count > 0)
                 {
-                    if (!(Get(rt, list) is IList items)) continue;
-                    foreach (var p in items)
+                    // VRCFury renamed it everywhere: set the VFnn_ copies
+                    foreach (var t in only)
                     {
-                        if (!string.Equals((string)Get(p, "name"), name, StringComparison.Ordinal)) continue;
-                        var boxed = Box(v, kind);
-                        if (kind == "Float") p.GetType().GetProperty("exportedValue")?.SetValue(p, boxed); // value + expressionValue
-                        else p.GetType().GetField("value").SetValue(p, boxed);
-                        applied.Add($"{name} = {boxed} ({kind})");
-                        found = true;
-                        break;
+                        var tk = WriteRuntimeParam(rt, t, v);
+                        if (expected != null && tk != null) expected[t] = Num(Box(v, tk));
+                        if (holdOwner != null) HoldParam(rt, t, v, holdOwner);
                     }
 
-                    if (found) break;
+                    applied.Add($"{name}: not on the runtime under that name; set VRCFury's {string.Join(", ", only)}");
+                    continue;
                 }
 
-                if (!found)
+                if (kindSet == null)
                 {
                     var close = RuntimeParams(rt).Select(p => p.name).Where(n => n != null && n.IndexOf(name, StringComparison.OrdinalIgnoreCase) >= 0).Take(10);
                     throw new ArgumentException($"Parameter '{name}' is not a built-in or an animator/expression parameter of this avatar. Similar: {string.Join(", ", close)}");
                 }
+
+                var line = $"{name} = {Box(v, kindSet)} ({kindSet})";
+                if (expected != null) expected[name] = Num(Box(v, kindSet));
+                if (holdOwner != null) HoldParam(rt, name, v, holdOwner);
+                if (twins)
+                {
+                    var tw = Twins(rt, name).ToList();
+                    foreach (var t in tw)
+                    {
+                        var tk = WriteRuntimeParam(rt, t, v);
+                        if (expected != null && tk != null) expected[t] = Num(Box(v, tk));
+                        if (holdOwner != null) HoldParam(rt, t, v, holdOwner);
+                    }
+
+                    if (tw.Count > 0) line += $", also VRCFury twin{(tw.Count > 1 ? "s" : "")} {string.Join(", ", tw)}";
+                }
+
+                applied.Add(line);
             }
 
             return applied;
@@ -306,7 +364,26 @@ namespace UnityVrcMcp.Editor
         {
             var rt = FindRuntime(a);
             var res = new JObject { ["avatar"] = GetPath(rt.transform) };
-            if (Arg(a, "params") is JObject values) res["applied"] = Av3Apply(rt, values);
+            var release = Arg(a, "release");
+            if (release != null)
+            {
+                var all = release.Type == JTokenType.Boolean ? release.Value<bool>() : release.ToString() == "all";
+                var list = release is JArray arr ? arr.Select(x => x.ToString()).ToList() : new List<string> { release.ToString() };
+                var before = Holds.Count;
+                ReleaseHolds(h => h.Owner == "av3_set" && (all || list.Contains(h.Name) || list.Any(n => VrcFuryTwin.Match(h.Name) is var m && m.Success && m.Groups[1].Value == n)));
+                res["released"] = before - Holds.Count;
+            }
+
+            if (GetPlayables(rt).Count == 0)
+                res["warning"] = "The emulator hasn't built its animator playables yet (just entered play mode?). The values are stored and pushed once they exist.";
+            if (Arg(a, "params") is JObject values)
+            {
+                var expected = new JObject();
+                res["applied"] = Av3Apply(rt, values, expected, Bool(a, "twins", true), Bool(a, "hold", false) ? "av3_set" : null);
+                if (expected.Count > 0) res["expected"] = expected; // the MCP server reads these back a few frames later
+            }
+
+            if (HoldsJson() is JObject held) res["held"] = held;
             if (Arg(a, "fields") is JObject fields)
             {
                 var set = new JArray();
@@ -343,16 +420,73 @@ namespace UnityVrcMcp.Editor
                 if (desc == null) throw new ArgumentException("No VRCAvatarDescriptor found.");
             }
 
-            var values = rt != null ? RuntimeParams(rt).Where(p => p.name != null).GroupBy(p => p.name).ToDictionary(g => g.Key, g => g.First().value) : null;
+            Dictionary<string, object> values = null;
+            if (rt != null)
+            {
+                values = RuntimeParams(rt).Where(p => p.name != null).GroupBy(p => p.name).ToDictionary(g => g.Key, g => g.First().value);
+                foreach (var lp in LiveParams(rt).Values) values[lp.Name] = lp.Value; // what the animators see
+            }
+
             var root = Get(desc, "expressionsMenu") as Object;
             if (!root) return "The avatar has no expressions menu (VRCFury may build one at play/upload time; in play mode the runtime's menu is used).";
-            var visited = new HashSet<Object>();
+
+            // menuPath: walk down to a submenu by control names ("Avatar/Face Tracking")
+            var menuPath = Str(a, "menuPath");
+            var start = root;
+            var walked = new List<string>();
+            if (menuPath != null)
+                foreach (var part in menuPath.Split(new[] { '/' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    var controls = (Get(start, "controls") as IEnumerable)?.Cast<object>().ToList() ?? new List<object>();
+                    var hit = controls.FirstOrDefault(c => string.Equals(Get(c, "type")?.ToString(), "SubMenu") && string.Equals(((string)Get(c, "name"))?.Trim(), part.Trim(), StringComparison.OrdinalIgnoreCase))
+                              ?? controls.FirstOrDefault(c => string.Equals(Get(c, "type")?.ToString(), "SubMenu") && ((string)Get(c, "name") ?? "").IndexOf(part.Trim(), StringComparison.OrdinalIgnoreCase) >= 0);
+                    if (!(Get(hit, "subMenu") is Object sub) || !sub)
+                        throw new ArgumentException($"No submenu '{part}' under '{(walked.Count == 0 ? "(root)" : string.Join("/", walked))}'. Submenus there: " +
+                                                    string.Join(", ", controls.Where(c => Get(c, "type")?.ToString() == "SubMenu").Select(c => (string)Get(c, "name"))));
+                    walked.Add((string)Get(hit, "name"));
+                    start = sub;
+                }
+
+            // find: flat list of controls whose name or parameter matches the glob
+            var find = Str(a, "find");
+            if (find != null)
+            {
+                var globs = Globs(new[] { find.Contains("*") ? find : "*" + find + "*" });
+                var hits = new JArray();
+                FindControls(start, string.Join("/", walked), globs, values, new HashSet<Object>(), hits);
+                return new JObject { ["menu"] = ObjRef(start), ["find"] = find, ["matches"] = hits };
+            }
+
             return new JObject
             {
-                ["menu"] = ObjRef(root),
-                ["controls"] = MenuControls(root, values, visited, 0, Int(a, "maxDepth", 6)),
+                ["menu"] = ObjRef(start),
+                ["menuPath"] = walked.Count > 0 ? string.Join("/", walked) : null,
+                ["controls"] = MenuControls(start, values, new HashSet<Object>(), 0, Int(a, "maxDepth", menuPath != null ? 3 : 2)),
                 ["note"] = rt == null ? "Edit mode: values not shown; enter play mode for live values." : null,
             };
+        }
+
+        static void FindControls(Object menu, string prefix, List<System.Text.RegularExpressions.Regex> globs, Dictionary<string, object> values, HashSet<Object> visited, JArray hits)
+        {
+            if (!visited.Add(menu) || !(Get(menu, "controls") is IEnumerable controls)) return;
+            foreach (var c in controls)
+            {
+                var name = (string)Get(c, "name") ?? "";
+                var type = Get(c, "type")?.ToString();
+                var param = Get(Get(c, "parameter"), "name") as string;
+                var subs = (Get(c, "subParameters") as IEnumerable)?.Cast<object>().Select(s => Get(s, "name") as string).Where(n => !string.IsNullOrEmpty(n)).ToList() ?? new List<string>();
+                var path = prefix.Length > 0 ? prefix + "/" + name : name;
+                if (globs.Any(g => g.IsMatch(name) || (param != null && g.IsMatch(param)) || subs.Any(g.IsMatch)) && hits.Count < 100)
+                {
+                    var line = $"{path} ({type})";
+                    foreach (var p in new[] { param }.Concat(subs).Where(p => !string.IsNullOrEmpty(p)))
+                        line += values != null ? $" {p}={(values.TryGetValue(p, out var cur) ? J(cur) : "MISSING")}" : $" {p}";
+                    if (type == "Toggle" || type == "Button") line += $" (sets {J(Get(c, "value"))})";
+                    hits.Add(line);
+                }
+
+                if (type == "SubMenu" && Get(c, "subMenu") is Object sub && sub) FindControls(sub, path, globs, values, visited, hits);
+            }
         }
 
         static JArray MenuControls(Object menu, Dictionary<string, object> values, HashSet<Object> visited, int depth, int maxDepth)
@@ -417,6 +551,7 @@ namespace UnityVrcMcp.Editor
         static bool Skip(string name) =>
             _recIgnore.Any(r => r.IsMatch(name)) || (_recOnly != null && !_recOnly.Any(r => r.IsMatch(name)));
         static int _recSamples;
+        static JObject _recSpec;
 
         static Dictionary<string, string> Snapshot(Component rt)
         {
@@ -432,11 +567,23 @@ namespace UnityVrcMcp.Editor
                 catch { /* skip */ }
             }
 
+            var live = LiveParams(rt);
             foreach (var (name, value, _, _) in RuntimeParams(rt))
             {
                 if (name == null || Skip(name) || d.ContainsKey("builtin:" + name)) continue;
-                d["param:" + name] = value is float f ? Math.Round(f, 2).ToString() : value?.ToString();
+                var v = live.TryGetValue(name, out var lp) ? lp.Value : value;
+                d["param:" + name] = v is float f ? Math.Round(f, 2).ToString() : v?.ToString();
             }
+
+            foreach (var lp in live.Values) // animator-only parameters (AAPs, VRCFury internals)
+            {
+                if (Skip(lp.Name) || d.ContainsKey("param:" + lp.Name) || d.ContainsKey("builtin:" + lp.Name)) continue;
+                d["param:" + lp.Name] = lp.Value is float f ? Math.Round(f, 2).ToString() : lp.Value?.ToString();
+            }
+
+            if (_recSpec != null)
+                foreach (var kv in Capture(rt.gameObject, _recSpec).Values)
+                    d[kv.Key] = kv.Key.StartsWith("bone:", StringComparison.Ordinal) ? Show(kv.Key, kv.Value).ToString() : Math.Round(kv.Value[0], 1).ToString();
 
             foreach (var pi in GetPlayables(rt))
             {
@@ -494,6 +641,9 @@ namespace UnityVrcMcp.Editor
                     _recIgnore = Globs((Arg(a, "ignore") as JArray)?.Select(x => x.ToString()) ?? DefaultRecordIgnore);
                     _recOnly = Globs((Arg(a, "only") as JArray)?.Select(x => x.ToString()));
                     _recRuntime = rt;
+                    _recSpec = null;
+                    if (Arg(a, "blendshapes") != null || Arg(a, "bones") != null)
+                        _recSpec = new JObject { ["blendshapes"] = Arg(a, "blendshapes"), ["bones"] = Arg(a, "bones") };
                     _recEvents = new List<string>();
                     _recStart = EditorApplication.timeSinceStartup;
                     _recStartFrame = Time.frameCount;

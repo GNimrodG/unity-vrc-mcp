@@ -43,8 +43,27 @@ namespace UnityVrcMcp.Editor
                     ["note"] = "Pass path for one avatar's report (sections for more detail), or all: true for every avatar's report.",
                 };
 
-            var reports = list.Select(d => (JToken)CompactReport(ReportAvatar(d, sections.Contains("parameters")), sections)).ToList();
+            var reports = list.Select(d =>
+            {
+                var r = CompactReport(ReportAvatar(d, sections.Contains("parameters")), sections);
+                if (Application.isPlaying) AddBuildOutputs(r, d);
+                return (JToken)r;
+            }).ToList();
             return reports.Count == 1 ? reports[0] : new JArray(reports);
+        }
+
+        /// <summary>Play mode: which build hooks (VRCFury, d4rkAvatarOptimizer) made the controllers the avatar runs.</summary>
+        static void AddBuildOutputs(JObject report, Component desc)
+        {
+            var ctrls = new List<(string, Object)>();
+            foreach (var field in new[] { "baseAnimationLayers", "specialAnimationLayers" })
+                if (Get(desc, field) is IEnumerable layers)
+                    foreach (var l in layers)
+                        ctrls.Add((Get(l, "type")?.ToString(), Get(l, "animatorController") as Object));
+            var outputs = BuildOutputs(ctrls.Where(c => c.Item1 != null));
+            if (outputs.Count == 0) return;
+            report["playModeControllers"] = outputs;
+            if (BuildNote(outputs) is string note) report["buildNote"] = note;
         }
 
         static readonly string[] AllSections = { "parameters", "components", "vrcfury", "meshes", "materials" };
@@ -427,15 +446,23 @@ namespace UnityVrcMcp.Editor
                 btParams.Add(bt.blendParameterY);
             }
 
-            if (depth > 6)
+            if (depth >= _treeDepth)
             {
-                o["children"] = $"{bt.children.Length} children (too deep)";
+                foreach (var child in bt.children) CollectMotion(child.motion, clips, btParams, bt.blendType == BlendTreeType.Direct ? child.directBlendParameter : null);
+                o["children"] = $"{bt.children.Length} children (deeper than maxTreeDepth {_treeDepth})";
                 return o;
             }
 
             var ch = new JArray();
+            var shown = 0;
             foreach (var child in bt.children)
             {
+                if (shown++ >= _treeChildren)
+                {
+                    CollectMotion(child.motion, clips, btParams, bt.blendType == BlendTreeType.Direct ? child.directBlendParameter : null);
+                    continue;
+                }
+
                 var co = new JObject();
                 if (bt.blendType == BlendTreeType.Direct)
                 {
@@ -448,8 +475,22 @@ namespace UnityVrcMcp.Editor
                 ch.Add(co);
             }
 
+            if (bt.children.Length > _treeChildren) ch.Add($"... {bt.children.Length - _treeChildren} more children (maxChildren)");
             o["children"] = ch;
             return o;
+        }
+
+        [ThreadStatic] static int _treeDepth, _treeChildren;
+
+        /// <summary>Records clips and parameters of a motion that isn't printed (for the checks).</summary>
+        static void CollectMotion(Motion m, HashSet<AnimationClip> clips, HashSet<string> btParams, string directParam)
+        {
+            if (!string.IsNullOrEmpty(directParam)) btParams.Add(directParam);
+            if (m is AnimationClip c) clips.Add(c);
+            if (!(m is BlendTree bt)) return;
+            if (bt.blendType != BlendTreeType.Direct) btParams.Add(bt.blendParameter);
+            if (bt.blendType != BlendTreeType.Simple1D && bt.blendType != BlendTreeType.Direct) btParams.Add(bt.blendParameterY);
+            foreach (var child in bt.children) CollectMotion(child.motion, clips, btParams, bt.blendType == BlendTreeType.Direct ? child.directBlendParameter : null);
         }
 
         static void Walk(AnimatorStateMachine sm, string prefix, List<(string path, AnimatorState state)> states,
@@ -509,6 +550,11 @@ namespace UnityVrcMcp.Editor
 
             var detail = (Str(a, "detail") ?? "states").ToLowerInvariant();
             var layerFilter = Str(a, "layer");
+            _treeDepth = Int(a, "maxTreeDepth", detail == "full" ? 4 : 2);
+            _treeChildren = Int(a, "maxChildren", detail == "full" ? 24 : 12);
+            var maxStates = Int(a, "maxStates", 120);
+            var usedParams = new HashSet<string>(StringComparer.Ordinal);
+            var filteredIssues = 0;
             var bindPath = Str(a, "bindingRoot");
             var bindRoot = bindPath != null ? FindGameObject(bindPath) : go;
             var issues = new JArray();
@@ -517,8 +563,6 @@ namespace UnityVrcMcp.Editor
             var res = new JObject
             {
                 ["controller"] = ObjRef(ctrl),
-                ["parameters"] = new JArray(ctrl.parameters.Select(p =>
-                    $"{p.name}: {p.type} = {(p.type == AnimatorControllerParameterType.Float ? R(p.defaultFloat).ToString() : p.type == AnimatorControllerParameterType.Int ? p.defaultInt.ToString() : p.defaultBool.ToString())}")),
             };
 
             var allClips = new HashSet<AnimationClip>();
@@ -544,10 +588,13 @@ namespace UnityVrcMcp.Editor
                 wdOff += off;
                 if (on > 0 && off > 0) wdByLayer[layer.name] = $"{on} on / {off} off";
 
-                // checks (all layers)
+                // checks (all layers; with a layer filter only the matching layers' findings are listed)
+                var matches = layerFilter == null || layer.name.IndexOf(layerFilter, StringComparison.OrdinalIgnoreCase) >= 0;
+                var issuesBefore = issues.Count;
+                var btBefore = new HashSet<string>(btParams);
                 var layerClips = new HashSet<AnimationClip>();
                 var motions = states.Select(s => (s.path, s.state, motion: DescribeMotion(s.state.motion, 0, layerClips, btParams))).ToList();
-                allClips.UnionWith(layerClips);
+                if (matches) allClips.UnionWith(layerClips);
                 foreach (var (label, t) in transitions)
                 foreach (var c in t.conditions)
                 {
@@ -572,10 +619,21 @@ namespace UnityVrcMcp.Editor
                         issues.Add($"[{layer.name}] {label} {TransitionString(t)}: 'Can Transition To Self' is on, so the state restarts every time the transition ends while the condition is true" +
                                    (ast.destinationState.behaviours.Length > 0 ? $" (re-runs {string.Join(", ", ast.destinationState.behaviours.Where(b => b).Select(b => b.GetType().Name))})." : "."));
 
-                if (layerFilter != null && layer.name.IndexOf(layerFilter, StringComparison.OrdinalIgnoreCase) < 0)
+                if (!matches)
                 {
+                    filteredIssues += issues.Count - issuesBefore;
+                    while (issues.Count > issuesBefore) issues.RemoveAt(issues.Count - 1);
                     layersOut.Add($"{li}: {layer.name} ({states.Count} states)");
                     continue;
+                }
+
+                foreach (var (_, t) in transitions)
+                foreach (var c in t.conditions) usedParams.Add(c.parameter);
+                usedParams.UnionWith(btParams.Except(btBefore));
+                foreach (var (_, st) in states)
+                {
+                    if (st.speedParameterActive) usedParams.Add(st.speedParameter);
+                    if (st.timeParameterActive) usedParams.Add(st.timeParameter);
                 }
 
                 var lo = new JObject
@@ -593,7 +651,7 @@ namespace UnityVrcMcp.Editor
                 if (detail != "summary")
                 {
                     var so = new JArray();
-                    foreach (var (spath, st, motion) in motions)
+                    foreach (var (spath, st, motion) in motions.Take(maxStates))
                     {
                         var s = new JObject { ["state"] = spath, ["motion"] = motion, ["wd"] = st.writeDefaultValues };
                         if (st.speedParameterActive) s["speedParam"] = st.speedParameter;
@@ -601,12 +659,13 @@ namespace UnityVrcMcp.Editor
                         if (st.timeParameterActive) s["motionTime"] = st.timeParameter;
                         if (st.behaviours.Length > 0)
                             s["behaviours"] = detail == "full"
-                                ? new JArray(st.behaviours.Select(b => b ? DumpObject(b, new JObject { ["depth"] = 3 }) : "<Missing>"))
+                                ? new JArray(st.behaviours.Select(b => b ? DumpObject(b, new JObject { ["depth"] = 2, ["maxArray"] = 16 }) : "<Missing>"))
                                 : new JArray(st.behaviours.Select(b => b ? b.GetType().Name : "<Missing>"));
                         if (detail == "full" && st.transitions.Length > 0) s["transitions"] = new JArray(st.transitions.Select(TransitionString));
                         so.Add(s);
                     }
 
+                    if (motions.Count > maxStates) so.Add($"... {motions.Count - maxStates} more states (maxStates)");
                     lo["states"] = so;
                     if (detail == "full")
                     {
@@ -617,6 +676,18 @@ namespace UnityVrcMcp.Editor
                 }
 
                 layersOut.Add(lo);
+            }
+
+            string ParamLine(AnimatorControllerParameter p) =>
+                $"{p.name}: {p.type} = {(p.type == AnimatorControllerParameterType.Float ? R(p.defaultFloat).ToString() : p.type == AnimatorControllerParameterType.Int ? p.defaultInt.ToString() : p.defaultBool.ToString())}";
+            if (layerFilter == null) res["parameters"] = new JArray(ctrl.parameters.Select(ParamLine));
+            else
+            {
+                if (!layers.Any(l => l.name.IndexOf(layerFilter, StringComparison.OrdinalIgnoreCase) >= 0))
+                    res["warning"] = $"No layer name contains '{layerFilter}'; the layers are listed below.";
+                res["parameters"] = new JArray(ctrl.parameters.Where(p => usedParams.Contains(p.name)).Select(ParamLine));
+                res["parametersNote"] = $"Only the {ctrl.parameters.Count(p => usedParams.Contains(p.name))} of {ctrl.parameters.Length} parameters the matching layers use.";
+                if (filteredIssues > 0) res["otherLayersIssues"] = $"{filteredIssues} issue(s) in layers outside the filter.";
             }
 
             res["layers"] = layersOut;

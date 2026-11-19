@@ -1,5 +1,29 @@
 # Changelog
 
+## 1.3.0 - 2026-11-19
+
+- `av3_state` reads parameter values from the animator playables (the emulator's own lists are stale for curve-driven
+  parameters such as AAPs). It lists curve-driven parameters with their playable, values that differ between playables
+  or from the emulator, held parameters, and which build hooks (VRCFury, d4rkAvatarOptimizer) made each controller.
+  `source: "emulator"` gives the old reading; `names` picks exact parameters.
+- `av3_set` writes values straight into the playables and clears the emulator's last-value cache, so a value set right
+  after entering play mode isn't lost. It also sets VRCFury's `VFnn_` copies and reads the values back a few frames
+  later: `reverted` lists what something changed back, such as a parameter compressor or a driver. `hold: true`
+  re-applies values every frame before the animators run, until `release`.
+- `ft_set`: simulates VRChat's native face tracking in play mode (Blendshapes Sets, Forward to Animator custom
+  expressions, eye gaze toward the Eye Look states) from Unified Expressions key values. Based on the comparison
+  harness from Dergal's native face tracking migration.
+- `snapshot`: captures blendshape weights, local transforms under bones and live parameters, and diffs two snapshots
+  with tolerances. `av3_record` also records blendshapes and bones.
+- `play_mode` waits until play mode has really started or stopped and returns the final state. Replies that aren't
+  JSON, which a bridge restarting during a reload sends, are retried instead of failing.
+- `set_property` sets GameObject `active`, `tag`, `layer` and `name`, undoable and in play mode too.
+- `inspect_animator`: `maxTreeDepth`, `maxChildren`, `maxStates`. With `layer`, parameters, issues and the binding
+  check cover only the matching layers.
+- `av3_menu` expands two levels by default; `menuPath` opens a submenu and `find` searches the whole tree.
+- `editor_prefs`: read, write or delete EditorPrefs keys.
+- `avatar_report` in play mode names the build hooks that made the avatar's controllers.
+
 ## 1.2.1 - 2026-11-19
 
 - `avatar_report` is compact by default (about 800 tokens instead of 5,000 for a large avatar); `sections` adds
