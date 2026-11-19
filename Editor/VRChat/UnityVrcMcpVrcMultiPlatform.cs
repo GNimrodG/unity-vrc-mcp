@@ -113,7 +113,7 @@ namespace UnityVrcMcp.Editor.VRChat
 
             rec[RecordReloaded] = true;
             SaveRecord(rec);
-            var job = McpJobs.Adopt((string)rec[RecordId], MpbJobKind, rec["started"]?.Value<double>() ?? EditorApplication.timeSinceStartup, PollMultiPlatform);
+            var job = McpJobs.Adopt((string)rec[RecordId], MpbJobKind, rec["started"]?.Value<double>() ?? McpJob.Now, PollMultiPlatform);
             job.OnCancel = () => CancelMultiPlatform(job);
             job.Log("re-attached after a script reload (build target now " + ApiPlatform(EditorUserBuildSettings.activeBuildTarget) + ")");
         }
@@ -142,7 +142,7 @@ namespace UnityVrcMcp.Editor.VRChat
                 "Keep the VRChat SDK Control Panel open and don't change the build target meanwhile.";
         }
 
-        static JObject StartMultiPlatform(IVRCSdkAvatarBuilderApi builder, GameObject go, List<BuildTarget> targets, UploadPrep prep, string thumbPath)
+        static JObject StartMultiPlatform(IVRCSdkAvatarBuilderApi builder, GameObject go, List<BuildTarget> targets, UploadPrep prep, string thumbPath, bool needsAgreement)
         {
             // The SDK Control Panel resumes the chain after each reload using these (they are what its own UI saves).
             AvatarBuilderSessionState.AvatarName = prep.Avatar.Name ?? "";
@@ -155,7 +155,7 @@ namespace UnityVrcMcp.Editor.VRChat
             builder.GetType().GetField("_selectedBuildTargets", AnyInstance)?.SetValue(builder, new List<BuildTarget>(targets));
 
             var id = $"{MpbJobKind}-{Guid.NewGuid().ToString("N").Substring(0, 8)}";
-            var started = EditorApplication.timeSinceStartup;
+            var started = McpJob.Now;
             SaveRecord(new JObject
             {
                 [RecordId] = id,
@@ -169,7 +169,8 @@ namespace UnityVrcMcp.Editor.VRChat
 
             var job = McpJobs.Adopt(id, MpbJobKind, started, PollMultiPlatform);
             job.OnCancel = () => CancelMultiPlatform(job);
-            job.Stage = "starting";
+            job.Stage = needsAgreement ? WaitingForAgreement : "starting";
+            if (needsAgreement) job.Log(WaitingForAgreement);
             _ = RunMultiPlatform(builder, go, prep.Avatar, thumbPath, job);
             return new JObject
             {
@@ -220,6 +221,11 @@ namespace UnityVrcMcp.Editor.VRChat
                 MarkRecord(job.Id, RecordSeen);
                 var count = ((JArray)snap[KeyPlatforms]).Count;
                 var built = snap["built"].Value<int>();
+                // The SDK asks for the copyright agreement before its first build: keep saying so until it builds.
+                if (job.Stage == WaitingForAgreement && built == 0 && VRCSdkControlPanel.window != null &&
+                    VRCSdkControlPanel.TryGetBuilder<IVRCSdkAvatarBuilderApi>(out var b) && b != null &&
+                    b.BuildState == VRC.SDKBase.Editor.SdkBuildState.Idle && b.UploadState == VRC.SDKBase.Editor.SdkUploadState.Idle)
+                    return;
                 job.Stage = $"{snap["state"]}: on {snap["currentTarget"]}" + (snap["next"]?.Type == JTokenType.String ? $", next {snap["next"]}" : "") +
                             $" ({Math.Min(built + 1, count)}/{count})";
                 job.Progress = count > 0 ? (double)built / count : (double?)null;

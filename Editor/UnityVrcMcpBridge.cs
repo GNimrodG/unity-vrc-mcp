@@ -245,6 +245,7 @@ namespace UnityVrcMcp.Editor
                     ["isPlaying"] = EditorApplication.isPlaying,
                     ["isPaused"] = EditorApplication.isPaused,
                     ["compileErrors"] = GetCompileErrors().Length,
+                    ["updatedUnix"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
                 }.ToString(Formatting.None);
             }
 

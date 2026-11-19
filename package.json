@@ -1,7 +1,7 @@
 {
   "name": "com.data-unknown.unity-vrc-mcp",
   "displayName": "Unity VRC MCP",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "unity": "2022.3",
   "description": "MCP server for Claude Code (and other MCP clients) that inspects and drives the Unity editor, focused on debugging VRChat avatars: animators, expression parameters/menus and live Av3Emulator inputs and states, plus VRChat SDK validation, builds and uploads.",
   "author": {

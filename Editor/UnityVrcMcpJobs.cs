@@ -36,28 +36,38 @@ namespace UnityVrcMcp.Editor
         public readonly CancellationTokenSource Cts = new CancellationTokenSource();
         readonly List<string> _log = new List<string>();
         readonly double _started;
+        double? _finished;
+
+        /// <summary>
+        /// Seconds since the Unix epoch. Thread-safe (unlike EditorApplication.timeSinceStartup, which throws off the main
+        /// thread: the SDK reports upload progress from a worker thread) and stable across domain reloads.
+        /// </summary>
+        public static double Now => DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0;
 
         public McpJob(double? started = null)
         {
-            _started = started ?? EditorApplication.timeSinceStartup;
+            _started = started ?? Now;
         }
-        double? _finished;
 
-        public double Elapsed => (_finished ?? EditorApplication.timeSinceStartup) - _started;
+        public double Elapsed => (_finished ?? Now) - _started;
         public CancellationToken Token => Cts.Token;
 
+        /// <summary>Safe to call from any thread.</summary>
         public void Log(string line)
         {
             if (string.IsNullOrEmpty(line)) return;
-            if (_log.Count > 0 && _log[_log.Count - 1].EndsWith(line, StringComparison.Ordinal)) return;
-            if (_log.Count >= 1000) _log.RemoveAt(0);
-            _log.Add($"{Elapsed:0.0}s {line}");
+            lock (_log)
+            {
+                if (_log.Count > 0 && _log[_log.Count - 1].EndsWith(line, StringComparison.Ordinal)) return;
+                if (_log.Count >= 1000) _log.RemoveAt(0);
+                _log.Add($"{Elapsed:0.0}s {line}");
+            }
         }
 
         public void Finish(string state)
         {
             State = state;
-            _finished = EditorApplication.timeSinceStartup;
+            _finished = Now;
         }
 
         public JObject ToJson(int logTail)
@@ -66,9 +76,11 @@ namespace UnityVrcMcp.Editor
             if (Stage != null) o["stage"] = Stage;
             if (Progress.HasValue) o["progress"] = Math.Round(Progress.Value, 3);
             if (Error != null) o["error"] = Error;
-            if (ErrorDetails != null) o["errorDetails"] = ErrorDetails;
+            // Errors logged during a job that still succeeded (e.g. shader warnings from build hooks) aren't its failure reason.
+            if (ErrorDetails != null) o[State == Failed || State == Cancelled ? "errorDetails" : "consoleErrors"] = ErrorDetails;
             if (Result != null) o["result"] = Result;
-            if (logTail > 0 && _log.Count > 0) o["log"] = new JArray(_log.Skip(Math.Max(0, _log.Count - logTail)));
+            lock (_log)
+                if (logTail > 0 && _log.Count > 0) o["log"] = new JArray(_log.Skip(Math.Max(0, _log.Count - logTail)));
             return o;
         }
     }
@@ -104,7 +116,7 @@ namespace UnityVrcMcp.Editor
             {
                 var inner = e is AggregateException ae && ae.InnerException != null ? ae.InnerException : e;
                 job.Error = $"{inner.GetType().Name}: {inner.Message}";
-                try { job.ErrorDetails = describeError?.Invoke(inner); }
+                try { job.ErrorDetails = describeError?.Invoke(inner) ?? job.ErrorDetails; }
                 catch { /* best effort */ }
                 job.Finish(McpJob.Failed);
             }

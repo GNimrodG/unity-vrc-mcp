@@ -81,9 +81,18 @@ builder, validation and API client, so they behave like the SDK Control Panel:
 - `vrc_upload`, `vrc_update_avatar`: upload a new version (or a new avatar), or change name, description, tags or
   release status. Without `confirm: true` they only return a preview of what would happen.
 
-Login only happens in the SDK Control Panel (it logs in with saved credentials when it opens); the tools never handle
-credentials. The SDK's copyright agreement dialog appears in Unity and must be answered there. API calls, builds and
-uploads run as background jobs: the tool waits for them, and `job_status` / `job_cancel` handle long ones.
+The tools never handle credentials. When the SDK isn't logged in yet, they log in with the credentials the SDK saved,
+exactly as the Control Panel does when it opens, so the panel doesn't need to be open. If nothing is saved (or it
+expired), log in once in the SDK Control Panel. API calls, builds and uploads run as background jobs: the tool waits
+for them, and `job_status` / `job_cancel` handle long ones.
+
+### Copyright agreement
+
+The SDK asks you to confirm VRChat's ownership agreement once per avatar per Unity session. The `vrc_upload` preview
+says whether it will ask and shows the agreement's text. You can answer it in the chat: when you agree there, the agent
+passes `agreeCopyright: true` and the agreement is recorded with VRChat exactly as the SDK's OK button does, so Unity
+doesn't ask. If you'd rather click it in Unity, or the avatar is brand new (it only gets an id during the upload), the
+job reports that it is waiting for you, and the agent tells you to click OK in the SDK Control Panel.
 
 ### Several platforms
 

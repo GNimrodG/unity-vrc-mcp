@@ -23,7 +23,8 @@ const projectDir = path.resolve(process.env.UNITY_PROJECT_DIR || findProject(her
 const VERSION = (() => {
   try { return createRequire(import.meta.url)('../package.json').version; } catch { return '0.0.0'; }
 })();
-const MAX_TEXT = 90_000;
+// Cap per tool result (~10k tokens) so one call can't flood the client's context; UNITY_MCP_MAX_CHARS overrides it.
+const MAX_TEXT = Number.parseInt(process.env.UNITY_MCP_MAX_CHARS ?? '', 10) || 40_000;
 
 const port = () => {
   if (process.env.UNITY_MCP_PORT) return Number(process.env.UNITY_MCP_PORT);
@@ -65,6 +66,18 @@ async function http(method, pathname, body, timeoutMs = 130_000) {
   try { json = JSON.parse(text); } catch { throw new Error(`Bad response (HTTP ${res.status}): ${text.slice(0, 500)}`); }
   if (res.status === 401) throw new Error('Bridge rejected the token (another Unity project on this port?).');
   return json;
+}
+
+/** Seconds the main thread hasn't refreshed the bridge status (a modal dialog blocks it), or 0. */
+async function mainThreadBlocked() {
+  try {
+    const h = await health();
+    if (h.isCompiling || h.isUpdating || !h.updatedUnix) return 0;
+    const age = Date.now() / 1000 - h.updatedUnix;
+    return age > 6 ? Math.round(age) : 0;
+  } catch {
+    return 0; // unreachable while reloading: handled by the caller's retry
+  }
 }
 
 async function health() {
@@ -207,10 +220,11 @@ const tools = [
   },
   {
     name: 'avatar_report',
-    description: 'VRChat avatar overview + automatic issue list: descriptor (view position, lip sync, playable layers, expression menu/parameters with synced bit cost), root Animator/rig, component counts, missing scripts, VRCFury components, skinned meshes (tris, blendshapes, bones, materials), shaders, PhysBone/contact counts.',
+    description: 'VRChat avatar overview + automatic issue list (missing scripts/bones/shaders, material slot mismatches, synced bits over 256, ...). Compact by default: descriptor (view position, lip sync, playable layers), expression menu/parameter cost, rig, stats (tris, materials, PhysBones, contacts), VRCFury feature counts, one line per skinned mesh. sections adds detail: parameters (every expression parameter), components (all component counts, all missing scripts), vrcfury (every VRCFury component), meshes (per-mesh bones, materials, root bone), materials (unique materials and shaders), or all. Without path and with several avatars in the scene it returns one summary line per avatar.',
     inputSchema: obj({
-      path: { type: 'string', description: 'Avatar root; omit for every VRCAvatarDescriptor in the open scenes.' },
-      listParameters: { type: 'boolean', description: 'List every expression parameter (default true).' },
+      path: { type: 'string', description: 'Avatar root; omit for a one-line summary of every avatar in the open scenes.' },
+      sections: { type: 'array', items: { type: 'string', enum: ['parameters', 'components', 'vrcfury', 'meshes', 'materials', 'all'] }, description: 'Extra detail to include.' },
+      all: { type: 'boolean', description: 'Without path: full (compact) reports for every avatar instead of summaries.' },
     }),
   },
   {
@@ -364,7 +378,7 @@ const tools = [
   },
   {
     name: 'vrc_upload',
-    description: "Build and upload an avatar to VRChat as a new version of its blueprint id, or as a NEW avatar if it has none (then name is required and a 1200x900 thumbnail is captured unless given). Without platforms it uploads for the current build target only; platforms (e.g. [\"all\"] or [\"windows\",\"android\"]) runs the SDK's multi-platform chain, which switches Unity's build target per platform (script reloads, possibly long Android/iOS re-imports), uses the avatar's per-platform overrides (e.g. a separate Quest object), returns to the original platform, and verifies each platform's new bundle on the VRChat API at the end. OUTWARD-FACING: without confirm it only returns the upload plan. Only call with confirm: true when the user explicitly asked to upload this avatar (and these platforms) and approved the plan in this conversation. The SDK may show its copyright agreement dialog in Unity, which only the user may answer. Optional info changes (name, description, tags, releaseStatus) are applied with the upload.",
+    description: "Build and upload an avatar to VRChat as a new version of its blueprint id, or as a NEW avatar if it has none (then name is required and a 1200x900 thumbnail is captured unless given). Without platforms it uploads for the current build target only; platforms (e.g. [\"all\"] or [\"windows\",\"android\"]) runs the SDK's multi-platform chain, which switches Unity's build target per platform (script reloads, possibly long Android/iOS re-imports), uses the avatar's per-platform overrides (e.g. a separate Quest object), returns to the original platform, and verifies each platform's new bundle on the VRChat API at the end. OUTWARD-FACING: without confirm it only returns the upload plan. Only call with confirm: true when the user explicitly asked to upload this avatar (and these platforms) and approved the plan in this conversation. COPYRIGHT AGREEMENT: the SDK requires VRChat's ownership agreement once per avatar per Unity session; the preview's copyrightAgreement says whether it is needed and gives its exact text. When it is, show the user that text before uploading. Pass agreeCopyright: true ONLY if the user explicitly agreed to that text in this conversation for this upload (it is recorded with VRChat exactly like the SDK's OK button, so no dialog appears); never infer or reuse an earlier agreement. Without it, or for a brand-new avatar, Unity shows the agreement and the user must click OK there; tell them before starting, and when the job reports it is waiting for them. Optional info changes (name, description, tags, releaseStatus) are applied with the upload.",
     inputSchema: obj({
       path: { type: 'string' },
       name: { type: 'string' },
@@ -373,6 +387,7 @@ const tools = [
       releaseStatus: { type: 'string', enum: ['private', 'public'] },
       thumbnail: { type: 'string', description: '"capture" for a new render, or an image path; default keeps the current thumbnail.' },
       platforms: { type: 'array', items: { type: 'string', enum: ['all', 'windows', 'android', 'ios', 'pc', 'quest'] }, description: 'Platforms to upload; omit for the current build target only.' },
+      agreeCopyright: { type: 'boolean', description: "The user explicitly agreed, in this conversation, to the copyright agreement text from the preview. Records it with VRChat so Unity doesn't ask." },
       confirm: { type: 'boolean' },
       wait: { type: 'number', description: 'Seconds to wait before returning the running job (default 1800, multi-platform 3600).' },
     }, ['path']),
@@ -461,7 +476,12 @@ async function waitJob(first, seconds) {
   const deadline = Date.now() + seconds * 1000;
   let note = null;
   while (job?.state === 'running' && Date.now() < deadline) {
+    if (job.stage?.startsWith('waiting for you'))
+      return { ...job, note: `The user has to act in Unity now: ${job.stage}. Tell them, then follow up with job_status {id: "${job.job}", wait: 1800}.` };
     await sleep(job.kind === 'vrc_upload_multi' ? 3000 : 1000);
+    const blocked = await mainThreadBlocked();
+    if (blocked)
+      return { ...job, note: `Unity's editor has been frozen for ${blocked}s, almost certainly by a dialog waiting for the user (for an upload: the VRChat copyright agreement). Tell the user to answer it in Unity, then follow up with job_status {id: "${job.job}", wait: 1800}.` };
     try {
       job = await call('job_status', { id: job.job, logTail: 40 });
       note = null;
@@ -532,8 +552,12 @@ async function runTool(name, args) {
 
 function asText(result) {
   let text = typeof result === 'string' ? result : JSON.stringify(result, null, 1);
+  // Indentation costs about a quarter of a big result; drop it before truncating anything.
+  if (text.length > MAX_TEXT && typeof result !== 'string') text = JSON.stringify(result);
   if (text.length > MAX_TEXT)
-    text = text.slice(0, MAX_TEXT) + `\n... [truncated ${text.length - MAX_TEXT} chars; narrow the query with path/layer/filter/limit]`;
+    text = text.slice(0, MAX_TEXT) +
+      `\n... [truncated: the full result was ${text.length} characters. Ask for less: a path, layer, filter, limit, ` +
+      'or fewer sections/detail. Set UNITY_MCP_MAX_CHARS for a higher cap.]';
   return text;
 }
 

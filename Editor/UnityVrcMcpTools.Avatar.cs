@@ -31,8 +31,118 @@ namespace UnityVrcMcp.Editor
             }
             else descs = AllRoots().SelectMany(r => r.GetComponentsInChildren(descType, true));
 
-            var arr = new JArray(descs.Select(d => (JToken)ReportAvatar(d, Bool(a, "listParameters", true))));
-            return arr.Count > 0 ? (JToken)arr : "No VRCAvatarDescriptor found in the open scenes.";
+            var list = descs.ToList();
+            if (list.Count == 0) return "No VRCAvatarDescriptor found in the open scenes.";
+            var sections = ReportSections(a);
+
+            // Several avatars: one short line each, details only for one avatar at a time.
+            if (path == null && list.Count > 1 && !Bool(a, "all", false))
+                return new JObject
+                {
+                    ["avatars"] = new JArray(list.Select(d => SceneSummary(ReportAvatar(d, false)))),
+                    ["note"] = "Pass path for one avatar's report (sections for more detail), or all: true for every avatar's report.",
+                };
+
+            var reports = list.Select(d => (JToken)CompactReport(ReportAvatar(d, sections.Contains("parameters")), sections)).ToList();
+            return reports.Count == 1 ? reports[0] : new JArray(reports);
+        }
+
+        static readonly string[] AllSections = { "parameters", "components", "vrcfury", "meshes", "materials" };
+
+        static HashSet<string> ReportSections(JObject a)
+        {
+            var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            if (Arg(a, "sections") is JArray arr)
+                foreach (var s in arr.Select(x => x.ToString()))
+                {
+                    if (s.Equals("all", StringComparison.OrdinalIgnoreCase)) set.UnionWith(AllSections);
+                    else if (AllSections.Contains(s, StringComparer.OrdinalIgnoreCase)) set.Add(s);
+                    else throw new ArgumentException($"Unknown section '{s}'. Use {string.Join(", ", AllSections)} or all.");
+                }
+
+            if (Bool(a, "listParameters", false)) set.Add("parameters"); // 1.x compatibility
+            return set;
+        }
+
+        static JObject SceneSummary(JObject full)
+        {
+            var stats = (JObject)full["stats"];
+            var issues = (JArray)full["issues"];
+            var o = new JObject
+            {
+                ["avatar"] = full["avatar"],
+                ["active"] = full["activeInHierarchy"],
+                ["summary"] = $"{stats["activeTriangles"]} tris, {stats["materialSlots"]} material slots, {stats["physBones"]} PhysBones, " +
+                              $"{full["expressionParameters"]?["syncedBits"] ?? 0}/256 synced bits",
+                ["issueCount"] = issues.Count,
+            };
+            if (issues.Count > 0) o["issues"] = new JArray(issues.Take(3).Concat(issues.Count > 3 ? new JToken[] { $"... {issues.Count - 3} more" } : Array.Empty<JToken>()));
+            return o;
+        }
+
+        /// <summary>Turns the full report into the default compact one; <paramref name="sections"/> keep their full detail.</summary>
+        static JObject CompactReport(JObject full, HashSet<string> sections)
+        {
+            var r = new JObject();
+            foreach (var key in new[] { "avatar", "activeInHierarchy", "viewPosition", "lipSync", "visemeMesh", "enableEyeLook" })
+                if (full[key] != null && full[key].Type != JTokenType.Null) r[key] = full[key];
+
+            var layers = ((JArray)full["baseAnimationLayers"]).Concat((JArray)full["specialAnimationLayers"]).ToList();
+            r["playableLayers"] = new JArray(layers.Where(l => l["controller"] != null || l["isDefault"]?.Value<bool>() == false)
+                .Select(l => $"{l["type"]}: {l["controller"] ?? "custom, no controller"}" + (l["mask"] != null ? $" (mask {l["mask"]})" : "")));
+            var defaults = layers.Where(l => l["controller"] == null && l["isDefault"]?.Value<bool>() != false).Select(l => l["type"].ToString()).ToList();
+            if (defaults.Count > 0) r["sdkDefaultLayers"] = string.Join(", ", defaults);
+
+            if (full["expressionsMenu"] is JObject menu) r["expressionsMenu"] = $"{menu["asset"]} ({menu["controls"]} controls)";
+            if (full["expressionParameters"] is JObject prm)
+            {
+                var p = new JObject { ["asset"] = prm["asset"], ["count"] = prm["count"], ["syncedBits"] = $"{prm["syncedBits"]}/256" };
+                if (prm["duplicates"] != null) p["duplicates"] = prm["duplicates"];
+                if (sections.Contains("parameters") && prm["parameters"] != null) p["parameters"] = prm["parameters"];
+                r["expressionParameters"] = p;
+            }
+
+            if (full["animator"] is JObject anim) r["animator"] = $"avatar {anim["avatar"] ?? "none"}, humanoid {anim["isHuman"]}, controller {anim["controller"] ?? "none"}";
+            r["stats"] = full["stats"];
+
+            if (sections.Contains("components")) r["componentCounts"] = full["componentCounts"];
+            if (full["missingScripts"] is JArray missing)
+                r["missingScripts"] = sections.Contains("components") || missing.Count <= 10 ? missing : new JArray(missing.Take(10).Concat(new JToken[] { $"... {missing.Count - 10} more" }));
+
+            if (full["vrcFury"] is JArray vf)
+            {
+                if (sections.Contains("vrcfury")) r["vrcFury"] = vf;
+                else
+                {
+                    // "path: Feature" -> counts per feature type
+                    var byType = vf.Select(x => x.ToString()).Select(s => s.Substring(s.LastIndexOf(": ", StringComparison.Ordinal) + 2))
+                        .GroupBy(t => t).OrderByDescending(g => g.Count()).Select(g => $"{g.Key} x{g.Count()}");
+                    r["vrcFury"] = $"{vf.Count} components: {string.Join(", ", byType)}";
+                }
+            }
+
+            var smrs = (JArray)full["skinnedMeshes"];
+            var mrs = full["meshRenderers"] as JArray ?? new JArray();
+            if (sections.Contains("meshes"))
+            {
+                r["skinnedMeshes"] = smrs;
+                if (mrs.Count > 0) r["meshRenderers"] = mrs;
+            }
+            else
+            {
+                r["skinnedMeshes"] = new JArray(smrs.Select(m =>
+                    $"{m["path"]}: {m["triangles"] ?? 0} tris, {m["blendShapes"] ?? 0} shapes, {((JArray)m["materials"]).Count} mats" +
+                    (m["visible"]?.Value<bool>() == false ? " (hidden)" : "")));
+                if (mrs.Count > 0)
+                    r["meshRenderers"] = $"{mrs.Count} ({mrs.Count(m => m["visible"]?.Value<bool>() != false)} visible)";
+            }
+
+            if (sections.Contains("materials")) r["materials"] = full["uniqueMaterialList"];
+            r["issues"] = full["issues"];
+            var missingSections = AllSections.Where(s => !sections.Contains(s)).ToList();
+            r["note"] = "Pre-build state (VRCFury and optimizers change it at build/play time)." +
+                        (missingSections.Count > 0 ? $" More detail: sections [{string.Join(", ", missingSections.Select(s => $"\"{s}\""))}] or [\"all\"]." : "");
+            return r;
         }
 
         static JArray DescribeLayers(object layers)
@@ -81,6 +191,14 @@ namespace UnityVrcMcp.Editor
             if (dupes.Count > 0) o["duplicates"] = dupes;
             if (list) o["parameters"] = lines;
             return o;
+        }
+
+        /// <summary>True when t and its parents up to (not including) root are activeSelf: active when the avatar is worn.</summary>
+        static bool ActiveWithin(Transform t, Transform root)
+        {
+            for (var x = t; x != null && x != root; x = x.parent)
+                if (!x.gameObject.activeSelf) return false;
+            return true;
         }
 
         static long TriangleCount(Mesh m)
@@ -182,7 +300,7 @@ namespace UnityVrcMcp.Editor
             {
                 var mesh = smr.sharedMesh;
                 var o = new JObject { ["path"] = GetPath(smr.transform) };
-                if (!smr.gameObject.activeInHierarchy || !smr.enabled) o["visible"] = false;
+                if (!ActiveWithin(smr.transform, go.transform) || !smr.enabled) o["visible"] = false;
                 materialSlots += smr.sharedMaterials.Length;
                 foreach (var m in smr.sharedMaterials) if (m) uniqueMats.Add(m);
                 o["materials"] = new JArray(smr.sharedMaterials.Select(MaterialLabel));
@@ -194,7 +312,7 @@ namespace UnityVrcMcp.Editor
                 }
 
                 var mt = TriangleCount(mesh);
-                if (smr.gameObject.activeInHierarchy) tris += mt;
+                if (ActiveWithin(smr.transform, go.transform)) tris += mt;
                 o["mesh"] = ObjRef(mesh);
                 o["vertices"] = mesh.vertexCount;
                 o["triangles"] = mt;
@@ -221,9 +339,9 @@ namespace UnityVrcMcp.Editor
                 var mesh = mf ? mf.sharedMesh : null;
                 materialSlots += mr.sharedMaterials.Length;
                 foreach (var m in mr.sharedMaterials) if (m) uniqueMats.Add(m);
-                if (mesh && mr.gameObject.activeInHierarchy) tris += TriangleCount(mesh);
+                if (mesh && ActiveWithin(mr.transform, go.transform)) tris += TriangleCount(mesh);
                 var o = new JObject { ["path"] = GetPath(mr.transform), ["mesh"] = ObjRef(mesh), ["materials"] = new JArray(mr.sharedMaterials.Select(MaterialLabel)) };
-                if (!mr.gameObject.activeInHierarchy || !mr.enabled) o["visible"] = false;
+                if (!ActiveWithin(mr.transform, go.transform) || !mr.enabled) o["visible"] = false;
                 mrs.Add(o);
             }
 
