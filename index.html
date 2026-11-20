@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Unity VRC MCP</title>
+<style>
+  :root { color-scheme: light dark; --fg: #1d1d1f; --bg: #fafafa; --muted: #6b6b70; --accent: #3f6ad8; --card: #fff; --line: #0001; }
+  @media (prefers-color-scheme: dark) { :root { --fg: #ececf1; --bg: #16171a; --muted: #a0a0aa; --accent: #7d9cf5; --card: #1f2024; --line: #fff2; } }
+  body { margin: 0; font: 16px/1.55 system-ui, sans-serif; color: var(--fg); background: var(--bg); }
+  main { max-width: 44rem; margin: 3rem auto; padding: 0 16px; }
+  h1 { margin: 0 0 .25rem; font-size: 2rem; }
+  .version { color: var(--muted); margin: 0 0 1.5rem; }
+  .button { display: inline-block; padding: .7rem 1.2rem; border-radius: 8px; background: var(--accent); color: #fff; text-decoration: none; font-weight: 600; }
+  .card { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 1rem 1.2rem; margin: 1.5rem 0; }
+  code { font: 14px ui-monospace, monospace; word-break: break-all; }
+  a { color: var(--accent); }
+</style>
+</head>
+<body>
+<main>
+  <h1>Unity VRC MCP</h1>
+  <p class="version">Version 1.3.1 &middot; VPM package <code>com.data-unknown.unity-vrc-mcp</code></p>
+  <p>MCP server for Claude Code (and other MCP clients) that inspects and drives the Unity editor, focused on debugging VRChat avatars: animators, expression parameters/menus and live Av3Emulator inputs and states, plus VRChat SDK validation, builds and uploads.</p>
+  <p><a class="button" href="vcc://vpm/addRepo?url=https%3A%2F%2Fraw.githubusercontent.com%2FGNimrodG%2Funity-vrc-mcp%2Fvpm%2Findex.json">Add to VCC / ALCOM</a></p>
+  <div class="card">
+    <p>The button opens VRChat Creator Companion or ALCOM. If nothing happens, add this repository by hand
+    (Settings &rarr; Packages &rarr; Add Repository):</p>
+    <p><code>https://raw.githubusercontent.com/GNimrodG/unity-vrc-mcp/vpm/index.json</code></p>
+  </div>
+  <p><a href="https://github.com/GNimrodG/unity-vrc-mcp#readme">Documentation and source</a></p>
+</main>
+</body>
+</html>
