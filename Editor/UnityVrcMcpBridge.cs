@@ -40,6 +40,7 @@ namespace UnityVrcMcp.Editor
         static volatile bool _running;
         static readonly ConcurrentQueue<Job> Jobs = new ConcurrentQueue<Job>();
         static string _token;
+        static readonly int ProcessId = System.Diagnostics.Process.GetCurrentProcess().Id;
         static int _port;
         static volatile string _statusJson = "{}";
         static double _nextStatus;
@@ -246,6 +247,7 @@ namespace UnityVrcMcp.Editor
                     ["isPaused"] = EditorApplication.isPaused,
                     ["compileErrors"] = GetCompileErrors().Length,
                     ["updatedUnix"] = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds() / 1000.0,
+                    ["pid"] = ProcessId, // lets the MCP server find (and answer) native dialogs that block the editor
                 }.ToString(Formatting.None);
             }
 

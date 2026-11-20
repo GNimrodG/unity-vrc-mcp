@@ -6,6 +6,7 @@
 // Port: $UNITY_MCP_PORT, else <project>/ProjectSettings/UnityVrcMcpPort.txt, else 47811.
 // Auth: token from <project>/Library/UnityVrcMcp/token (written by the bridge).
 
+import { execFile } from 'node:child_process';
 import { existsSync, readFileSync } from 'node:fs';
 import { createRequire } from 'node:module';
 import path from 'node:path';
@@ -81,6 +82,49 @@ async function mainThreadBlocked() {
   }
 }
 
+/**
+ * Native dialogs (EditorUtility.DisplayDialog, SDK/VRCFury error boxes) open in the Unity process, read from outside
+ * Unity because they block its main thread. Windows only; null when they can't be read. With click, presses that button.
+ */
+async function unityDialogs({ click, title } = {}) {
+  if (process.platform !== 'win32') return null;
+  let pid;
+  try {
+    pid = (await health()).pid;
+  } catch {
+    return null;
+  }
+  const target = pid ? ['-ProcessId', String(pid)] : ['-Port', String(port())];
+  const args = ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-File', path.join(here, 'unity-dialogs.ps1'), ...target];
+  if (click) args.push('-Click', click);
+  if (title) args.push('-Title', title);
+  return new Promise((resolve, reject) => {
+    execFile(path.join(process.env.SystemRoot || String.raw`C:\Windows`, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe'), args, { timeout: 30_000, windowsHide: true }, (err, stdout, stderr) => {
+      if (err) {
+        const msg = (stderr || err.message).split(/\r?\n/).find((l) => l.trim()) ?? err.message;
+        return click ? reject(new Error(msg.replace(/^.*?:\s*/, ''))) : resolve(null);
+      }
+      try {
+        resolve(JSON.parse(stdout));
+      } catch {
+        resolve(null);
+      }
+    });
+  });
+}
+
+const describeDialogs = (list) =>
+  list.map((d) => `"${d.title}": ${d.text.replace(/\s+/g, ' ').trim()} [buttons: ${d.buttons.join(', ')}]`).join('; ');
+
+/** Throws a helpful error when Unity's main thread is stuck on a native dialog. */
+async function failIfDialog(h) {
+  if (h.isCompiling || h.isUpdating || !h.updatedUnix || Date.now() / 1000 - h.updatedUnix < 4) return;
+  const found = (await unityDialogs())?.dialogs ?? [];
+  if (!found.length) return;
+  throw new Error(`Unity is blocked by a dialog: ${describeDialogs(found)}. Tell the user what it says. ` +
+    'unity_dialog {action: "click", button: "..."} can press a button: do that for error/info messages, and for real choices only with the button the user picked.');
+}
+
 async function health() {
   const h = await http('GET', '/health', null, 5000);
   if (h.project && norm(h.project) !== norm(projectDir))
@@ -111,9 +155,10 @@ async function waitIdle(maxMs = 180_000, minMs = 1500) {
 
 async function call(tool, args) {
   const attempt = async () => {
-    await health();
+    await failIfDialog(await health());
     const r = await http('POST', '/call', { tool, args });
     if (!r.ok) {
+      if (/waiting for the Unity main thread/.test(r.error)) await failIfDialog(await health());
       const err = new Error(r.error + (r.stack ? `\n${r.stack}` : ''));
       err.unity = true;
       if (/reloading scripts/.test(r.error)) err.retry = true;
@@ -292,6 +337,16 @@ const tools = [
       method: { type: 'string' },
       args: { type: 'array', items: {} },
     }, ['type', 'method']),
+  },
+
+  {
+    name: 'unity_dialog',
+    description: 'Native Unity dialogs that block the editor (EditorUtility.DisplayDialog: VRChat SDK and VRCFury error boxes like "Exception in VRCSDKPreprocessAvatarCallback Callback", confirmations). list shows each dialog\'s title, text and buttons; click presses a button the way a mouse click does (Unity can stay in the background). Press only buttons that dismiss an error or info message, or the button the user chose for a real decision. Other tools report such a dialog when it blocks them, and play_mode and vrc_build/vrc_upload close one-button error boxes themselves and report their text (UNITY_MCP_AUTO_DISMISS=0 turns that off). Windows only.',
+    inputSchema: obj({
+      action: { type: 'string', enum: ['list', 'click'], description: 'Default list.' },
+      button: { type: 'string', description: 'click: button label without &, e.g. "Ok", "Yes", "Cancel".' },
+      title: { type: 'string', description: 'Only dialogs whose title contains this (needed when several are open).' },
+    }),
   },
 
   // ---- Av3Emulator (play mode) ----
@@ -513,7 +568,7 @@ const READ_ONLY = new Set([
   'inspect_animator', 'inspect_clip', 'capture_view', 'av3_state', 'av3_menu', 'snapshot', 'vrc_sdk_status', 'vrc_performance',
   'vrc_avatar_info', 'vrc_my_avatars', 'job_status',
 ]);
-const DESTRUCTIVE = new Set(['vrc_upload', 'vrc_update_avatar', 'execute_code', 'invoke_static_method', 'execute_menu_item', 'edit_animator', 'set_property', 'editor_prefs']);
+const DESTRUCTIVE = new Set(['vrc_upload', 'vrc_update_avatar', 'execute_code', 'invoke_static_method', 'execute_menu_item', 'edit_animator', 'set_property', 'editor_prefs', 'unity_dialog']);
 const OPEN_WORLD = new Set(['vrc_upload', 'vrc_update_avatar', 'vrc_avatar_info', 'vrc_my_avatars']);
 for (const t of tools) {
   const title = t.name.split('_').map((w) => w[0].toUpperCase() + w.slice(1)).join(' ');
@@ -532,11 +587,26 @@ async function waitJob(first, seconds) {
   let job = first;
   const deadline = Date.now() + seconds * 1000;
   let note = null;
+  const dismissed = [];
+  const withDismissed = (j) => (dismissed.length ? { ...j, dismissedDialogs: dismissed } : j);
   while (job?.state === 'running' && Date.now() < deadline) {
     if (job.stage?.startsWith('waiting for you'))
       return { ...job, note: `The user has to act in Unity now: ${job.stage}. Tell them, then follow up with job_status {id: "${job.job}", wait: 1800}.` };
     await sleep(job.kind === 'vrc_upload_multi' ? 3000 : 1000);
     const blocked = await mainThreadBlocked();
+    if (blocked) {
+      // A build hook that throws makes the SDK show a one-button error box; press it so the job can report the failure.
+      const found = (await unityDialogs())?.dialogs ?? [];
+      const autoOk = process.env.UNITY_MCP_AUTO_DISMISS !== '0' && /^vrc_(build|upload)/.test(job.kind ?? '');
+      const single = found.find((d) => d.buttons.length === 1);
+      if (autoOk && single && dismissed.length < 5) {
+        await unityDialogs({ click: single.buttons[0], title: single.title });
+        dismissed.push(`${single.title}: ${single.text.replace(/\s+/g, ' ').trim()}`);
+        continue;
+      }
+      if (found.length)
+        return { ...job, ...(dismissed.length ? { dismissedDialogs: dismissed } : {}), note: `Unity is blocked by a dialog: ${describeDialogs(found)}. Tell the user; unity_dialog can press a button (error/info messages, or the button the user picked). Then follow up with job_status {id: "${job.job}", wait: 1800}.` };
+    }
     if (blocked)
       return { ...job, note: `Unity's editor has been frozen for ${blocked}s, almost certainly by a dialog waiting for the user (for an upload: the VRChat copyright agreement). Tell the user to answer it in Unity, then follow up with job_status {id: "${job.job}", wait: 1800}.` };
     try {
@@ -552,13 +622,13 @@ async function waitJob(first, seconds) {
     }
   }
   if (job?.state === 'running')
-    return { ...job, note: note ?? `Still running; check again with job_status {id: "${job.job}", wait: 1800}.` };
+    return withDismissed({ ...job, note: note ?? `Still running; check again with job_status {id: "${job.job}", wait: 1800}.` });
   if (job?.state === 'done' && job.result?.followJob) {
     const next = await call('job_status', { id: job.result.followJob, logTail: 40 });
     const remaining = Math.max(0, (deadline - Date.now()) / 1000);
-    return { started: job.result, ...(await waitJob(next, Math.max(remaining, 3600))) };
+    return withDismissed({ started: job.result, ...(await waitJob(next, Math.max(remaining, 3600))) });
   }
-  return job;
+  return withDismissed(job);
 }
 
 async function record(args, seconds) {
@@ -601,10 +671,19 @@ async function playMode(args) {
   const want = args.state === 'play';
   const start = Date.now();
   let h = null;
+  const dismissed = [];
   while (Date.now() - start < 180_000) {
     try {
       h = await health();
       if (h.isPlaying === want && !h.isCompiling && !h.isUpdating) break;
+      // Build hooks run when play mode starts (VRCFury, NDMF); one that throws leaves a one-button error box
+      if (dismissed.length < 5 && process.env.UNITY_MCP_AUTO_DISMISS !== '0' && h.updatedUnix && Date.now() / 1000 - h.updatedUnix > 3) {
+        const single = ((await unityDialogs())?.dialogs ?? []).find((d) => d.buttons.length === 1);
+        if (single) {
+          await unityDialogs({ click: single.buttons[0], title: single.title });
+          dismissed.push(`${single.title}: ${single.text.replace(/\s+/g, ' ').trim()}`);
+        }
+      }
     } catch (e) {
       if (!(e instanceof BridgeDown)) throw e;
     }
@@ -613,6 +692,10 @@ async function playMode(args) {
   if (h?.isPlaying === want) h = await waitIdle(60_000, 500);
   const { wasPlaying, ...rest } = r;
   const out = { ...rest, isPlaying: h?.isPlaying ?? null };
+  if (dismissed.length) {
+    out.dismissedDialogs = dismissed;
+    out.dialogNote = 'A build hook failed while play mode started; its error box was closed. The avatar may be only partly processed: check console_logs.';
+  }
   if (h?.isPlaying !== want)
     out.warning = `Play mode is still ${h?.isPlaying ? 'on' : 'off'} after ${Math.round((Date.now() - start) / 1000)}s (console_logs: a build hook may have failed).`;
   return out;
@@ -630,6 +713,19 @@ async function runTool(name, args) {
     return r?.job && (r.state === 'running' || r.result?.followJob) ? waitJob(r, wait ?? def) : r;
   }
   switch (name) {
+    case 'unity_dialog': {
+      if ((args.action ?? 'list') === 'list') {
+        const r = await unityDialogs({ title: args.title });
+        if (!r) return 'Dialogs can only be read on Windows while the Unity bridge answers.';
+        return r.dialogs.length ? r : 'No native dialog is open in Unity.';
+      }
+      if (!args.button) throw new Error("'button' is required for click.");
+      const r = await unityDialogs({ click: args.button, title: args.title });
+      if (!r) throw new Error('Dialogs can only be pressed on Windows while the Unity bridge answers.');
+      await sleep(1000);
+      const left = (await unityDialogs())?.dialogs ?? [];
+      return { ...r, stillOpen: left.length ? left : undefined };
+    }
     case 'av3_record':
       return args.seconds ? record(args, args.seconds) : call(name, args);
     case 'av3_set': {

@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.3.1 - 2026-11-20
+
+- Native Unity dialogs that block the editor (SDK, VRCFury and NDMF error boxes, `EditorUtility.DisplayDialog`) are read
+  from outside Unity on Windows. A tool call that runs into one fails at once with the dialog's title, text and
+  buttons, instead of timing out after two minutes. The new `unity_dialog` tool lists them or presses a button.
+  `play_mode`, `vrc_build` and `vrc_upload` close one-button error boxes themselves and report their text
+  (`UNITY_MCP_AUTO_DISMISS=0` turns that off).
+- The bridge's status includes the editor's process id.
+
 ## 1.3.0 - 2026-11-19
 
 - `av3_state` reads parameter values from the animator playables (the emulator's own lists are stale for curve-driven

@@ -46,7 +46,7 @@ or updating the package.
 
 | Area | Tools |
 |---|---|
-| Editor | `unity_status`, `console_logs`, `refresh_assets`, `play_mode`, `execute_menu_item`, `invoke_static_method`, `editor_prefs` |
+| Editor | `unity_status`, `console_logs`, `refresh_assets`, `play_mode`, `execute_menu_item`, `invoke_static_method`, `editor_prefs`, `unity_dialog` |
 | Scene and assets | `hierarchy`, `find_objects`, `inspect_object`, `set_property`, `blendshapes`, `find_assets`, `select`, `capture_view` |
 | Avatar (edit mode) | `avatar_report`, `inspect_animator` (write defaults, condition/parameter checks, clip bindings vs. the avatar), `inspect_clip`, `av3_menu` |
 | Av3Emulator (play mode) | `av3_state`, `av3_set` (with read-back, VRCFury twins, hold), `av3_record`, `av3_menu` (with live values), `ft_set` (native face tracking simulation) |
